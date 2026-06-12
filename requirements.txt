@@ -1,0 +1,8 @@
+fastapi==0.103.1
+uvicorn==0.23.2
+requests==2.31.0
+pydantic==2.3.0
+python-dotenv==1.0.0
+google-generativeai==0.3.0
+apify-client==1.4.1
+pyairtable==2.1.0.post1
