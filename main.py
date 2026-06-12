@@ -67,8 +67,8 @@ async def receive_message(request: Request):
                             # 1. Log incoming message to Airtable
                             airtable.append_conversation(sender_phone, user_text, "User")
                             
-                            # 2. Update status to 'Responded' if they reply
-                            airtable.update_lead_status(sender_phone, "Responded")
+                            # 2. Update status to 'Contacted' if they reply
+                            airtable.update_lead_status(sender_phone, "Contacted")
                             
                             # 3. Generate AI response
                             ai_response = gemini.generate_response(sender_phone, user_text)
