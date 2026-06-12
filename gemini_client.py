@@ -25,7 +25,7 @@ Be conversational, detect their intent, and if they show interest, ask for a sui
 
 class GeminiClient:
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         # Simple in-memory storage for chat sessions mapped by phone number.
         self.chats = {} 
         
