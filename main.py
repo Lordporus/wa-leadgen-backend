@@ -64,8 +64,15 @@ async def receive_message(request: Request):
                                 logger.info(f"New inbound lead detected: {sender_phone}")
                                 airtable.add_lead(name="WhatsApp User", phone=sender_phone, source="WhatsApp Inbound")
                                 
-                            # 1. Log incoming message to Airtable
-                            airtable.append_conversation(sender_phone, user_text, "User")
+                            # 1. Log incoming message to Airtable (overwrite Last_Message)
+                            airtable.update_last_message(sender_phone, user_text, "User")
+                            
+                            # Extract lead info (Name, Business_Name) asynchronously-ish
+                            info = gemini.extract_lead_info(user_text)
+                            extracted_name = info.get("Name")
+                            extracted_biz = info.get("Business_Name")
+                            if extracted_name or extracted_biz:
+                                airtable.update_lead_info(sender_phone, extracted_name, extracted_biz)
                             
                             # 2. Update status to 'Contacted' if they reply
                             airtable.update_lead_status(sender_phone, "Contacted")
@@ -76,12 +83,14 @@ async def receive_message(request: Request):
                             # 4. Send the response back via WhatsApp
                             whatsapp.send_message(sender_phone, ai_response)
                             
-                            # 5. Log outbound message to Airtable
-                            airtable.append_conversation(sender_phone, ai_response, "AI")
+                            # 5. Log outbound message to Airtable (overwrite Last_Message)
+                            airtable.update_last_message(sender_phone, ai_response, "AI")
                             
-                            # If AI determines they want a call, we update status to 'Qualified'
-                            # In a production system, we'd have the AI return structured JSON to detect "hot lead" intent.
-                            if "call" in ai_response.lower() or "connect" in ai_response.lower() or "team" in ai_response.lower() or "sure" in ai_response.lower():
+                            # 6. Evaluate intent for status updates
+                            lower_resp = ai_response.lower()
+                            if any(word in lower_resp for word in ["book", "appointment", "confirm", "time"]):
+                                airtable.update_lead_status(sender_phone, "Booked")
+                            elif any(word in lower_resp for word in ["call", "connect", "team", "sure"]):
                                 airtable.update_lead_status(sender_phone, "Qualified")
                             
         return {"status": "success"}

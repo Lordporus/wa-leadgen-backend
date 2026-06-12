@@ -71,3 +71,19 @@ class GeminiClient:
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             return "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
+
+    def extract_lead_info(self, text: str):
+        prompt = f"""
+        Extract the person's name and business/clinic name from the following text if present.
+        Return ONLY a JSON dictionary with keys "Name" and "Business_Name". 
+        If a value is not found, use null.
+        Text: "{text}"
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            import json
+            content = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"Extraction error: {e}")
+            return {}

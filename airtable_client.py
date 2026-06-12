@@ -60,18 +60,32 @@ class AirtableClient:
             logger.error(f"Error updating lead status in Airtable: {e}")
             return None
             
-    def append_conversation(self, phone: str, message: str, sender: str):
-        """Append message to a Conversation History field if it exists."""
+    def update_last_message(self, phone: str, message: str, sender: str):
+        """Update Last_Message field to reflect the most recent message."""
         if not self.table: return None
         try:
             formula = f"{{Phone number type}}='{phone}'"
             records = self.table.all(formula=formula)
             if records:
-                record = records[0]
-                record_id = record['id']
-                existing_history = record['fields'].get('Last_Message', '')
-                new_entry = f"{sender}: {message}\n"
-                new_history = existing_history + new_entry
-                self.table.update(record_id, {"Last_Message": new_history})
+                record_id = records[0]['id']
+                self.table.update(record_id, {"Last_Message": f"{sender}: {message}"})
         except Exception as e:
-            logger.error(f"Error appending conversation to Airtable: {e}")
+            logger.error(f"Error updating Last_Message: {e}")
+
+    def update_lead_info(self, phone: str, name: str, business_name: str):
+        """Update lead Name and Business_Name fields."""
+        if not self.table: return None
+        try:
+            formula = f"{{Phone number type}}='{phone}'"
+            records = self.table.all(formula=formula)
+            if records:
+                record_id = records[0]['id']
+                fields_to_update = {}
+                if name: fields_to_update["Name"] = name
+                if business_name: fields_to_update["Business_Name"] = business_name
+                
+                if fields_to_update:
+                    self.table.update(record_id, fields_to_update)
+                    logger.info(f"Updated info for {phone}: {fields_to_update}")
+        except Exception as e:
+            logger.error(f"Error updating lead info: {e}")
