@@ -59,6 +59,11 @@ async def receive_message(request: Request):
                             user_text = message["text"]["body"]
                             logger.info(f"Received message from {sender_phone}: {user_text}")
                             
+                            # 0. Check if lead exists, create if not
+                            if not airtable.get_lead(sender_phone):
+                                logger.info(f"New inbound lead detected: {sender_phone}")
+                                airtable.add_lead(name="WhatsApp User", phone=sender_phone, source="WhatsApp Inbound")
+                                
                             # 1. Log incoming message to Airtable
                             airtable.append_conversation(sender_phone, user_text, "User")
                             

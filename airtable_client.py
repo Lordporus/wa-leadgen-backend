@@ -1,5 +1,6 @@
 from pyairtable import Table
 import logging
+from datetime import datetime
 from config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
 
 logger = logging.getLogger(__name__)
@@ -12,6 +13,17 @@ class AirtableClient:
         else:
             self.table = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
+    def get_lead(self, phone: str):
+        """Check if a lead exists by phone."""
+        if not self.table: return None
+        try:
+            formula = f"{{Phone number type}}='{phone}'"
+            records = self.table.all(formula=formula)
+            return records[0] if records else None
+        except Exception as e:
+            logger.error(f"Error getting lead: {e}")
+            return None
+
     def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps"):
         """Add a new lead to Airtable."""
         if not self.table: return None
@@ -20,7 +32,8 @@ class AirtableClient:
                 "Name": name,
                 "Phone number type": phone,
                 "Source": source,
-                "Status": "New Lead"
+                "Status": "New Lead",
+                "Created_At": datetime.now().isoformat()
             })
             logger.info(f"Added lead to Airtable: {name}")
             return record
