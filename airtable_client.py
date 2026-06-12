@@ -18,7 +18,7 @@ class AirtableClient:
         try:
             record = self.table.create({
                 "Name": name,
-                "Phone": phone,
+                "Phone number type": phone,
                 "Source": source,
                 "Status": "New Lead"
             })
@@ -33,7 +33,7 @@ class AirtableClient:
         if not self.table: return None
         try:
             # Note: The Airtable formula syntax requires matching the field exactly.
-            formula = f"{{Phone}}='{phone}'"
+            formula = f"{{Phone number type}}='{phone}'"
             records = self.table.all(formula=formula)
             if records:
                 record_id = records[0]['id']
@@ -51,14 +51,14 @@ class AirtableClient:
         """Append message to a Conversation History field if it exists."""
         if not self.table: return None
         try:
-            formula = f"{{Phone}}='{phone}'"
+            formula = f"{{Phone number type}}='{phone}'"
             records = self.table.all(formula=formula)
             if records:
                 record = records[0]
                 record_id = record['id']
-                existing_history = record['fields'].get('Conversation History', '')
+                existing_history = record['fields'].get('Last_Message', '')
                 new_entry = f"{sender}: {message}\n"
                 new_history = existing_history + new_entry
-                self.table.update(record_id, {"Conversation History": new_history})
+                self.table.update(record_id, {"Last_Message": new_history})
         except Exception as e:
             logger.error(f"Error appending conversation to Airtable: {e}")
