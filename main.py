@@ -5,6 +5,7 @@ import hmac
 from config import WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 from whatsapp_client import WhatsAppClient
 from airtable_client import AirtableClient
+from gemini_client import GeminiClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ app = FastAPI(title="WhatsApp Acquisition Backend")
 
 whatsapp = WhatsAppClient()
 airtable = AirtableClient()
+gemini = GeminiClient()
 
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
@@ -85,12 +87,32 @@ async def receive_message(request: Request):
                             # If matched: log message
                             airtable.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text")
                             
-                            # Update lead status to "Contacted" if currently "New Lead"
+                            # Refresh lead to get updated Last_Message
+                            lead = airtable.get_lead(sender_phone)
                             current_status = lead.get("fields", {}).get("Status")
+                            
+                            # Update lead status to "Contacted" if currently "New Lead"
                             if current_status == "New Lead":
                                 airtable.update_lead_status(sender_phone, "Contacted")
                                 
-                            # (AI routing logic deferred to Phase 4)
+                            # Phase 4: AI Routing & Scoring
+                            last_message = lead.get("fields", {}).get("Last_Message", "")
+                            parsed_history = gemini.parse_conversation_history(last_message)
+                            
+                            ai_reply = gemini.generate_response_with_history(parsed_history, user_text)
+                            whatsapp.send_message(sender_phone, ai_reply)
+                            airtable.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text")
+                            
+                            # Refresh lead to score the full conversation including the outbound message
+                            lead_after_reply = airtable.get_lead(sender_phone)
+                            updated_last_message = lead_after_reply.get("fields", {}).get("Last_Message", "")
+                            
+                            score = gemini.score_lead(updated_last_message)
+                            airtable.update_lead_score(sender_phone, score)
+                            
+                            if score == "Hot":
+                                airtable.update_lead_status(sender_phone, "Qualified")
+                                logger.info(f"🔥 HOT LEAD: {lead.get('fields', {}).get('Name', 'Unknown')} {sender_phone}")
                             
                 # Check for message status updates (delivered/read)
                 elif "statuses" in value:

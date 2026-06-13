@@ -132,6 +132,13 @@ class AirtableClient:
             self._update(records[0]["id"], fields)
             logger.info(f"Lead info updated for {phone}: {fields}")
 
+    def update_lead_score(self, phone: str, score: str) -> None:
+        """Update Lead_Score field."""
+        records = self._search(f"{{Phone number type}}='{phone}'")
+        if not records:
+            return
+        self._update(records[0]["id"], {"Lead_Score": score})
+        logger.info(f"Lead score updated to {score} for {phone}")
 
 class _TableShim:
     """

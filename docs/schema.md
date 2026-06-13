@@ -26,6 +26,7 @@ This is the single source of truth for all prospects in the system.
 | `Status`            | Single select      | Webhook / Pipeline  | Current pipeline stage. Allowed values: `New Lead`, `Contacted`, `Qualified`, `Booked`, `Closed`, `Lost`. |
 | `Business_Name`     | Single line text   | AI extraction       | Name of the clinic/business, extracted from conversation when user mentions it. |
 | `Last_Message`      | Long text          | Webhook             | Append-only log of all conversation history. Stores timestamp, direction (INBOUND/OUTBOUND), type (text/template), and message body. Replaces the need for a separate Messages table in MVP. |
+| `Lead_Score`        | Single line text   | AI extraction       | AI-generated score of the lead based on conversation (Cold / Warm / Hot). |
 | `Created_At`        | Single line text   | Scraper / Webhook   | ISO 8601 timestamp of when the record was created. Set at creation, never updated. |
 
 ---

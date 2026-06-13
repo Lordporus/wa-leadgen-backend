@@ -11,61 +11,76 @@ else:
     logger.warning("GEMINI_API_KEY not found. AI responses will fail.")
 
 SYSTEM_PROMPT = """
-Tum BuildWithPorus ke AI sales assistant ho — ek B2B marketing agency jo dentists ko WhatsApp aur AI automation ke through naye patient leads dilate hai, bina expensive ads ke.
+Tum Team BuildWithPorus ke AI sales assistant ho — ek B2B marketing agency jo dentists ko WhatsApp aur AI automation ke through naye patient leads dilate hai, bina expensive ads ke.
 
-TONE: Friendly, confident, sales-driven Hinglish. Short messages, WhatsApp-style (no long paragraphs). Emojis sparingly use karo. Always end with a question to keep conversation going (engagement maintain karna).
+TONE: Friendly, confident, sales-driven Hinglish. Short messages, WhatsApp-style (maximum 2-3 lines). Emojis sparingly use karo. Corporate ya robotic bilkul nahi lagna chahiye.
 
-GOAL: Dentist ko interested karna, unki problem (patients ki kami / inconsistent inquiries) identify karna, aur ek free demo call/consultation book karna.
+GOAL: Naturally (conversation ke through, interrogation nahi) in signals ko surface karna:
+1. NEED: Kya clinic currently enough new patients lane me struggle kar raha hai?
+2. AUTHORITY: Kya ye person owner/decision-maker hai for marketing spend?
+3. BUDGET FIT: Gauge willingness - jaise "agar hum aapko har mahine 10-15 ready patients la kar dein, kya iske liye ₹15-20k/month invest karna sense banega?"
+4. TIMELINE: Agar interested hain, toh kab start karna chahenge?
 
-FAQs - inhe naturally answer karo jab user poochhe:
+End goal of a "hot" conversation: offer to set up a quick call. (Bas yahi bolna hai: "hamari team aapko call karegi").
 
-1. Pricing kitna hai?
-"Hamara starting plan 5000-20000/month se start hota hai — isme lead generation, WhatsApp automation, aur monthly reporting sab included hai. Exact pricing aapke clinic ki location aur goals ke hisaab se vary karta hai, isliye ek quick call par discuss karte hain."
+OBJECTION HANDLING (Few-shot examples):
+User: "Not interested"
+AI: "Koi problem nahi doctor! Just in case aap future mein patient footfall badhana chahein, hum connected rahenge. Have a great day! 😊"
 
-2. Kab tak results milenge / Timeline?
-"Setup ke 7-10 din ke andar leads aana shuru ho jaate hain. First month me hum aapke area ke potential patients ko target karna start karte hain."
+User: "Send details"
+AI: "Zaroor! Main details bhej deta hoon. Waise abhi aap patients lane ke liye kya strategies use kar rahe hain, jaise JustDial ya ads?"
 
-3. Kitne leads milenge per month?
-"Average 15-30 qualified leads/month milte hain, depending on aapke area ki population aur competition par. Hum quality par focus karte hain — sirf wo log jo genuinely interested hain."
+User: "Abhi busy hoon"
+AI: "No worries doctor, samajh sakta hoon. Main kal is waqt ek baar fir message karunga. Ya phir aap apne free time mein reply kar sakte hain."
 
-4. Kaise kaam karta hai (process)?
-"Simple 3-step process: 1) Hum aapke area ke potential patients ko identify karte hain, 2) AI-powered WhatsApp outreach se unse contact karte hain, 3) Interested logo ko directly aapke clinic se connect karte hain ya appointment book karte hain."
+User: "Kitna cost hai?"
+AI: "Cost clinic ki requirements par depend karta hai, par agar hum aapko har mahine 10-15 ready patients la kar dein, kya iske liye ₹15-20k/month invest karna sense banega aapke liye?"
 
-5. Mujhe kya setup karna padega / tech effort?
-"Bilkul kuch nahi! Hum end-to-end setup handle karte hain. Aapko sirf WhatsApp par leads ka reply dena hai — bas itna hi."
+User: "How does this work"
+AI: "Hum aapke local area mein potential patients ko identify karte hain aur WhatsApp automation ke through unhe aapke clinic se connect karte hain. Kya main aapke clinic ke liye ek free strategy call arrange karun?"
 
-6. Aapke pehle ke results/proof?
-"Hum currently dentists ke saath kaam kar rahe hain jinhe consistent inquiries mil rahi hain bina ads ke. Demo call par hum case studies share kar sakte hain."
-
-7. Trial ya refund policy?
-"Hum ek free strategy call offer karte hain jaha hum aapke clinic ke liye ek custom plan discuss karenge — koi commitment nahi. Agar sahi laga tabhi aage badhenge."
-
-CONVERSATION FLOW:
-- Pehla message: friendly greeting + pain point identify karo ("Kya aapke clinic ko aur patients ki zarurat hai?")
-- Agar interested ho: FAQs answer karo as needed
-- Hamesha conversation ko "free call book karna" ki taraf le jao
-- Agar user not interested / "no" bole, politely close karo, pushy mat bano
-
-IMPORTANT: Kabhi bhi guaranteed exact number of patients/sales promise mat karo — "average results" ki baat karo, "guarantee" word avoid karo.
+IMPORTANT: Hamesha conversation naturally lead karo, question by question.
 """
 
 class GeminiClient:
     def __init__(self):
         self.model = genai.GenerativeModel('gemini-2.5-flash')
-        # Simple in-memory storage for chat sessions mapped by phone number.
-        self.chats = {} 
         
-    def get_or_create_chat(self, phone_number: str):
-        if phone_number not in self.chats:
-            self.chats[phone_number] = self.model.start_chat(history=[
+    def parse_conversation_history(self, history_text: str):
+        """
+        Parses Last_Message append-only log into a list of Gemini history dicts:
+        [{'role': 'user'|'model', 'parts': ['text']}]
+        INBOUND -> user, OUTBOUND -> model
+        Format: [YYYY-MM-DD HH:MM:SS] INBOUND (text): Message text
+        """
+        if not history_text:
+            return []
+        
+        history = []
+        lines = history_text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if "] INBOUND" in line:
+                parts = line.split("): ", 1)
+                if len(parts) > 1:
+                    history.append({"role": "user", "parts": [parts[1]]})
+            elif "] OUTBOUND" in line:
+                parts = line.split("): ", 1)
+                if len(parts) > 1:
+                    history.append({"role": "model", "parts": [parts[1]]})
+        return history
+
+    def generate_response_with_history(self, parsed_history: list, user_message: str) -> str:
+        try:
+            gemini_history = [
                 {"role": "user", "parts": [SYSTEM_PROMPT]},
                 {"role": "model", "parts": ["Understood. I will act as the sales assistant in Hinglish."]}
-            ])
-        return self.chats[phone_number]
-
-    def generate_response(self, phone_number: str, user_message: str) -> str:
-        try:
-            chat = self.get_or_create_chat(phone_number)
+            ]
+            gemini_history.extend(parsed_history)
+            
+            chat = self.model.start_chat(history=gemini_history)
             response = chat.send_message(user_message)
             return response.text
         except Exception as e:
@@ -87,3 +102,26 @@ class GeminiClient:
         except Exception as e:
             logger.error(f"Extraction error: {e}")
             return {}
+
+    def score_lead(self, conversation_text: str) -> str:
+        prompt = f"""
+        Analyze the following conversation history between an AI sales assistant and a dentist.
+        Score the lead as "Cold", "Warm", or "Hot" based on the signals for NEED, AUTHORITY, BUDGET FIT, and TIMELINE.
+        - Hot: Clearly interested, ready to book a call, confirmed budget fit or strong need.
+        - Warm: Engaged, asking questions, somewhat interested but hasn't committed to a call.
+        - Cold: Not interested, dismissive, or completely unresponsive to the value proposition.
+        
+        Return ONLY the word "Cold", "Warm", or "Hot".
+        
+        Conversation:
+        {conversation_text}
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            score = response.text.strip().replace('"', '').replace('.', '').capitalize()
+            if score in ["Cold", "Warm", "Hot"]:
+                return score
+            return "Cold"
+        except Exception as e:
+            logger.error(f"Scoring error: {e}")
+            return "Cold"
