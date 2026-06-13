@@ -134,6 +134,14 @@ async def receive_message(request: Request):
                         sender_phone = message.get("from")
                         message_type = message.get("type")
                         
+                        # ── FIX 1: Hard guard — ignore any message from LORD_PHONE_NUMBER ──
+                        # Normalise both sides (strip +, spaces, dashes) before comparing.
+                        normalized_sender = sender_phone.replace('+', '').replace(' ', '').replace('-', '') if sender_phone else ''
+                        normalized_lord   = LORD_PHONE_NUMBER.replace('+', '').replace(' ', '').replace('-', '') if LORD_PHONE_NUMBER else ''
+                        if normalized_lord and normalized_sender == normalized_lord:
+                            logger.warning(f"Ignored: message from LORD_PHONE_NUMBER ({sender_phone}) — loop guard triggered.")
+                            continue
+                        
                         if message_type == "text":
                             user_text = message["text"]["body"]
                             logger.info(f"Received message from {sender_phone}: {user_text}")
@@ -172,7 +180,15 @@ async def receive_message(request: Request):
                             if score == "Hot":
                                 airtable.update_lead_status(sender_phone, "Qualified")
                                 if LORD_PHONE_NUMBER:
-                                    whatsapp.send_message(LORD_PHONE_NUMBER, f"🔥 HOT LEAD ALERT: Check Airtable for {lead.get('fields', {}).get('Name', 'Unknown')} ({sender_phone})")
+                                    # ── FIX 2: Defense-in-depth — never alert to a number that is also an Airtable lead ──
+                                    norm_lord = LORD_PHONE_NUMBER.replace('+', '').replace(' ', '').replace('-', '')
+                                    if airtable.get_lead(norm_lord):
+                                        logger.error(
+                                            f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({LORD_PHONE_NUMBER}) matches an "
+                                            f"existing Airtable lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
+                                        )
+                                    else:
+                                        whatsapp.send_message(LORD_PHONE_NUMBER, f"🔥 HOT LEAD ALERT: Check Airtable for {lead.get('fields', {}).get('Name', 'Unknown')} ({sender_phone})")
                                 else:
                                     logger.info(f"🔥 HOT LEAD: {lead.get('fields', {}).get('Name', 'Unknown')} {sender_phone}")
                             elif score == "Cold":

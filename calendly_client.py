@@ -23,7 +23,16 @@ class CalendlyClient:
                 user_resp.raise_for_status()
                 self.user_uri = user_resp.json()["resource"]["uri"]
                 
-            events_url = f"https://api.calendly.com/scheduled_events?user={self.user_uri}&sort=start_time:desc&status=active"
+            org_uri = None
+            if self.user_uri:
+                user_resp = requests.get(self.user_uri, headers=self.headers)
+                user_resp.raise_for_status()
+                org_uri = user_resp.json()["resource"].get("current_organization")
+                
+            if not org_uri:
+                return []
+
+            events_url = f"https://api.calendly.com/scheduled_events?organization={org_uri}&sort=start_time:desc"
             events_resp = requests.get(events_url, headers=self.headers)
             events_resp.raise_for_status()
             events = events_resp.json().get("collection", [])
@@ -53,12 +62,31 @@ class CalendlyClient:
             return []
 
     def _extract_phone(self, invitee: dict):
-        phone = invitee.get("text_reminder_number")
-        if phone: return phone.replace('+', '')
+        import re
         
-        for q in invitee.get("questions_and_answers", []):
-            q_text = q.get("question", "").lower()
-            if "phone" in q_text or "whatsapp" in q_text or "number" in q_text:
-                # Remove spaces, dashes, plus sign to match Airtable format
-                return q.get("answer", "").replace('+', '').replace(' ', '').replace('-', '')
+        # 1. Preferred: SMS reminder number (set when invitee opts into text reminders)
+        raw_phone = invitee.get("text_reminder_number")
+        
+        if not raw_phone:
+            for q in invitee.get("questions_and_answers", []):
+                answer = q.get("answer", "")
+                q_text = q.get("question", "").lower()
+                
+                # 2. Question explicitly asks for phone/whatsapp
+                if "phone" in q_text or "whatsapp" in q_text or "number" in q_text:
+                    raw_phone = answer
+                    break
+                
+                # 3. Fallback: any answer that is purely a phone-number-like string
+                #    (9+ consecutive digits after stripping +/spaces/dashes)
+                digits_only = re.sub(r'[\+\s\-\(\)]', '', answer)
+                if re.fullmatch(r'\d{9,15}', digits_only):
+                    raw_phone = answer
+                    break
+
+        if raw_phone:
+            normalized = re.sub(r'[\+\s\-\(\)]', '', raw_phone)
+            logger.info(f"Calendly raw phone: '{raw_phone}' -> normalized: '{normalized}'")
+            return normalized
+
         return None
