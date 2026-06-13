@@ -2,19 +2,78 @@ from fastapi import FastAPI, Request, HTTPException
 import logging
 import hashlib
 import hmac
-from config import WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
+import os
+from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
+from config import WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER
 from whatsapp_client import WhatsAppClient
 from airtable_client import AirtableClient
 from gemini_client import GeminiClient
+from calendly_client import CalendlyClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="WhatsApp Acquisition Backend")
-
 whatsapp = WhatsAppClient()
 airtable = AirtableClient()
 gemini = GeminiClient()
+calendly = CalendlyClient()
+
+def follow_up_job():
+    logger.info("Running hourly follow-up job...")
+    records = airtable._search("{Status}='Contacted'")
+    now = datetime.now()
+    for r in records:
+        last_msg = r.get("fields", {}).get("Last_Message", "")
+        if last_msg:
+            try:
+                last_line = last_msg.strip().split('\n')[-1]
+                time_str = last_line.split(']')[0].strip('[')
+                msg_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                if now - msg_time > timedelta(hours=48):
+                    phone = r.get("fields", {}).get("Phone number type")
+                    logger.info(f"[DRY-RUN] Lead {phone} is eligible for follow-up (Contacted > 48h). Template dentist_followup_v1 pending approval.")
+            except Exception as e:
+                logger.error(f"Error parsing timestamp for follow-up: {e}")
+
+def calendly_sync_job():
+    logger.info("Running Calendly sync job...")
+    bookings = calendly.get_recent_bookings()
+    if not bookings:
+        logger.info("No recent Calendly bookings found.")
+        return
+        
+    for booking in bookings:
+        phone = booking.get("phone")
+        if not phone:
+            logger.info(f"Unmatched booking (no phone provided): {booking.get('name')}")
+            continue
+            
+        lead = airtable.get_lead(phone)
+        if lead:
+            current_status = lead.get("fields", {}).get("Status")
+            if current_status == "Qualified":
+                airtable.update_lead_status(phone, "Booked")
+                airtable.append_message(phone, "system", f"Calendly Booking Confirmed for {booking.get('start_time')}", "system")
+                if LORD_PHONE_NUMBER:
+                    whatsapp.send_message(LORD_PHONE_NUMBER, f"📅 BOOKED: {booking.get('name')} booked a call for {booking.get('start_time')}")
+            else:
+                logger.info(f"Matched booking for {phone} but lead status is {current_status}, not Qualified.")
+        else:
+            logger.info(f"Unmatched booking (phone {phone} not in Leads): {booking.get('name')}")
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(follow_up_job, 'interval', hours=1)
+scheduler.add_job(calendly_sync_job, 'interval', hours=1)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(title="WhatsApp Acquisition Backend", lifespan=lifespan)
 
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
@@ -112,7 +171,15 @@ async def receive_message(request: Request):
                             
                             if score == "Hot":
                                 airtable.update_lead_status(sender_phone, "Qualified")
-                                logger.info(f"🔥 HOT LEAD: {lead.get('fields', {}).get('Name', 'Unknown')} {sender_phone}")
+                                if LORD_PHONE_NUMBER:
+                                    whatsapp.send_message(LORD_PHONE_NUMBER, f"🔥 HOT LEAD ALERT: Check Airtable for {lead.get('fields', {}).get('Name', 'Unknown')} ({sender_phone})")
+                                else:
+                                    logger.info(f"🔥 HOT LEAD: {lead.get('fields', {}).get('Name', 'Unknown')} {sender_phone}")
+                            elif score == "Cold":
+                                decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
+                                if any(word in user_text.lower() for word in decline_keywords):
+                                    airtable.update_lead_status(sender_phone, "Lost")
+                                    logger.info(f"Lead {sender_phone} marked as Lost due to explicit decline.")
                             
                 # Check for message status updates (delivered/read)
                 elif "statuses" in value:

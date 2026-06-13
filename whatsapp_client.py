@@ -129,3 +129,21 @@ class WhatsAppClient:
             if e.response is not None:
                 logger.error(f"Error details: {e.response.text}")
             return None
+
+    def get_template(self, name: str) -> dict | None:
+        """Get template status from Meta."""
+        if not self.business_account_id:
+            logger.error("WHATSAPP_BUSINESS_ACCOUNT_ID missing. Cannot fetch template.")
+            return None
+            
+        url = f"https://graph.facebook.com/v17.0/{self.business_account_id}/message_templates?name={name}"
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            return data[0] if data else None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch template {name}: {e}")
+            return None

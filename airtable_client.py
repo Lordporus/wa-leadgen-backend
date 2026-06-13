@@ -48,7 +48,7 @@ class AirtableClient:
             resp = requests.post(
                 self.base_url,
                 headers=self.headers,
-                json={"fields": fields},
+                json={"fields": fields, "typecast": True},
                 timeout=10,
             )
             resp.raise_for_status()
@@ -64,7 +64,7 @@ class AirtableClient:
             resp = requests.patch(
                 f"{self.base_url}/{record_id}",
                 headers=self.headers,
-                json={"fields": fields},
+                json={"fields": fields, "typecast": True},
                 timeout=10,
             )
             resp.raise_for_status()
@@ -137,8 +137,9 @@ class AirtableClient:
         records = self._search(f"{{Phone number type}}='{phone}'")
         if not records:
             return
-        self._update(records[0]["id"], {"Lead_Score": score})
-        logger.info(f"Lead score updated to {score} for {phone}")
+        updated = self._update(records[0]["id"], {"Lead_Score": score})
+        if updated:
+            logger.info(f"Lead score updated to {score} for {phone}")
 
 class _TableShim:
     """
