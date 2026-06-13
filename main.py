@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
 import logging
-from config import WHATSAPP_VERIFY_TOKEN
+import hashlib
+import hmac
+from config import WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
 from whatsapp_client import WhatsAppClient
-from gemini_client import GeminiClient
 from airtable_client import AirtableClient
 
 logging.basicConfig(level=logging.INFO)
@@ -12,8 +12,19 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="WhatsApp Acquisition Backend")
 
 whatsapp = WhatsAppClient()
-gemini = GeminiClient()
 airtable = AirtableClient()
+
+def verify_signature(payload: bytes, signature_header: str) -> bool:
+    """Verify Meta's X-Hub-Signature-256 header."""
+    if not WHATSAPP_APP_SECRET or not signature_header:
+        return False
+    expected_sig = hmac.new(
+        WHATSAPP_APP_SECRET.encode('utf-8'),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(f"sha256={expected_sig}", signature_header)
+
 
 @app.get("/")
 def read_root():
@@ -23,7 +34,6 @@ def read_root():
 def verify_webhook(request: Request):
     """
     Meta Webhook Verification Route.
-    Meta sends a GET request here when you configure the webhook in the App Dashboard.
     """
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
@@ -43,13 +53,21 @@ async def receive_message(request: Request):
     """
     Receive incoming messages from WhatsApp users.
     """
+    # 1. Verify signature
+    signature = request.headers.get("X-Hub-Signature-256")
+    body_bytes = await request.body()
+    if WHATSAPP_APP_SECRET and not verify_signature(body_bytes, signature):
+        logger.warning("Invalid webhook signature rejected.")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
     body = await request.json()
     
-    # Process only if it's a valid WhatsApp API payload
     if body.get("object") == "whatsapp_business_account":
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
+                
+                # Check for incoming messages
                 if "messages" in value:
                     for message in value["messages"]:
                         sender_phone = message.get("from")
@@ -59,39 +77,25 @@ async def receive_message(request: Request):
                             user_text = message["text"]["body"]
                             logger.info(f"Received message from {sender_phone}: {user_text}")
                             
-                            # 0. Check if lead exists, create if not
-                            if not airtable.get_lead(sender_phone):
-                                logger.info(f"New inbound lead detected: {sender_phone}")
-                                airtable.add_lead(name="WhatsApp User", phone=sender_phone, source="WhatsApp Inbound")
+                            lead = airtable.get_lead(sender_phone)
+                            if not lead:
+                                logger.info(f"Message from unknown number {sender_phone}. Logging and ignoring.")
+                                continue
                                 
-                            # 1. Log incoming message to Airtable (overwrite Last_Message)
-                            airtable.update_last_message(sender_phone, user_text, "User")
+                            # If matched: log message
+                            airtable.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text")
                             
-                            # Extract lead info (Name, Business_Name) asynchronously-ish
-                            info = gemini.extract_lead_info(user_text)
-                            extracted_name = info.get("Name")
-                            extracted_biz = info.get("Business_Name")
-                            if extracted_name or extracted_biz:
-                                airtable.update_lead_info(sender_phone, extracted_name, extracted_biz)
+                            # Update lead status to "Contacted" if currently "New Lead"
+                            current_status = lead.get("fields", {}).get("Status")
+                            if current_status == "New Lead":
+                                airtable.update_lead_status(sender_phone, "Contacted")
+                                
+                            # (AI routing logic deferred to Phase 4)
                             
-                            # 2. Update status to 'Contacted' if they reply
-                            airtable.update_lead_status(sender_phone, "Contacted")
-                            
-                            # 3. Generate AI response
-                            ai_response = gemini.generate_response(sender_phone, user_text)
-                            
-                            # 4. Send the response back via WhatsApp
-                            whatsapp.send_message(sender_phone, ai_response)
-                            
-                            # 5. Log outbound message to Airtable (overwrite Last_Message)
-                            airtable.update_last_message(sender_phone, ai_response, "AI")
-                            
-                            # 6. Evaluate intent for status updates
-                            lower_resp = ai_response.lower()
-                            if any(word in lower_resp for word in ["book", "appointment", "confirm", "time"]):
-                                airtable.update_lead_status(sender_phone, "Booked")
-                            elif any(word in lower_resp for word in ["call", "connect", "team", "sure"]):
-                                airtable.update_lead_status(sender_phone, "Qualified")
+                # Check for message status updates (delivered/read)
+                elif "statuses" in value:
+                    for status in value["statuses"]:
+                        logger.info(f"Message {status['id']} to {status['recipient_id']} status: {status['status']}")
                             
         return {"status": "success"}
     return {"status": "ignored"}

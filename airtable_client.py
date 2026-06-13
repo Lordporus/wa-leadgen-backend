@@ -1,4 +1,4 @@
-from pyairtable import Table
+import requests
 import logging
 from datetime import datetime
 from config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
@@ -6,86 +6,141 @@ from config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
 logger = logging.getLogger(__name__)
 
 class AirtableClient:
+    """
+    Thin wrapper around the Airtable REST API v0.
+    Uses raw requests — no pyairtable dependency (avoids pydantic v1/Python 3.12 crash).
+    """
     def __init__(self):
-        if not all([AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME]):
+        self.ok = all([AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME])
+        if not self.ok:
             logger.warning("Airtable credentials not fully configured.")
-            self.table = None
-        else:
-            self.table = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+            return
+        self.base_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+        self.headers = {
+            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        # Expose a .table stub so scraper.py's direct `airtable.table.create()` call works
+        self.table = _TableShim(self)
 
-    def get_lead(self, phone: str):
-        """Check if a lead exists by phone."""
-        if not self.table: return None
+    # ── internal helpers ──────────────────────────────────────────────────
+
+    def _search(self, formula: str) -> list:
+        """Return list of matching Airtable records."""
+        if not self.ok: return []
         try:
-            formula = f"{{Phone number type}}='{phone}'"
-            records = self.table.all(formula=formula)
-            return records[0] if records else None
+            resp = requests.get(
+                self.base_url,
+                headers=self.headers,
+                params={"filterByFormula": formula},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json().get("records", [])
         except Exception as e:
-            logger.error(f"Error getting lead: {e}")
+            logger.error(f"Airtable search error: {e}")
+            return []
+
+    def _create(self, fields: dict) -> dict | None:
+        """Create a new record and return it."""
+        if not self.ok: return None
+        try:
+            resp = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json={"fields": fields},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Airtable create error: {e}")
             return None
 
-    def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps"):
-        """Add a new lead to Airtable."""
-        if not self.table: return None
+    def _update(self, record_id: str, fields: dict) -> dict | None:
+        """PATCH-update a record by ID."""
+        if not self.ok: return None
         try:
-            record = self.table.create({
-                "Name": name,
-                "Phone number type": phone,
-                "Source": source,
-                "Status": "New Lead",
-                "Created_At": datetime.now().isoformat()
-            })
-            logger.info(f"Added lead to Airtable: {name}")
-            return record
+            resp = requests.patch(
+                f"{self.base_url}/{record_id}",
+                headers=self.headers,
+                json={"fields": fields},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
         except Exception as e:
-            logger.error(f"Error adding lead to Airtable: {e}")
+            logger.error(f"Airtable update error: {e}")
             return None
 
-    def update_lead_status(self, phone: str, status: str):
-        """Find lead by phone and update status."""
-        if not self.table: return None
-        try:
-            # Note: The Airtable formula syntax requires matching the field exactly.
-            formula = f"{{Phone number type}}='{phone}'"
-            records = self.table.all(formula=formula)
-            if records:
-                record_id = records[0]['id']
-                updated_record = self.table.update(record_id, {"Status": status})
-                logger.info(f"Updated lead {phone} status to {status}")
-                return updated_record
-            else:
-                logger.warning(f"Lead with phone {phone} not found for status update.")
-                return None
-        except Exception as e:
-            logger.error(f"Error updating lead status in Airtable: {e}")
+    # ── public API ────────────────────────────────────────────────────────
+
+    def get_lead(self, phone: str) -> dict | None:
+        """Return the first record matching this phone, or None."""
+        records = self._search(f"{{Phone number type}}='{phone}'")
+        return records[0] if records else None
+
+    def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
+        """Create a new lead record."""
+        record = self._create({
+            "Name":              name,
+            "Phone number type": phone,
+            "Source":            source,
+            "Status":            "New Lead",
+            "Created_At":        datetime.now().isoformat(),
+        })
+        if record:
+            logger.info(f"Added lead: {name} ({phone})")
+        return record
+
+    def update_lead_status(self, phone: str, status: str) -> dict | None:
+        """Find lead by phone and update its Status field."""
+        records = self._search(f"{{Phone number type}}='{phone}'")
+        if not records:
+            logger.warning(f"Lead not found for status update: {phone}")
             return None
+        record_id = records[0]["id"]
+        updated = self._update(record_id, {"Status": status})
+        if updated:
+            logger.info(f"Status updated → {status}: {phone}")
+        return updated
+
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
+        """Append a message to the Last_Message long text field (used as MVP message log)."""
+        records = self._search(f"{{Phone number type}}='{phone}'")
+        if not records:
+            return
             
-    def update_last_message(self, phone: str, message: str, sender: str):
-        """Update Last_Message field to reflect the most recent message."""
-        if not self.table: return None
-        try:
-            formula = f"{{Phone number type}}='{phone}'"
-            records = self.table.all(formula=formula)
-            if records:
-                record_id = records[0]['id']
-                self.table.update(record_id, {"Last_Message": f"{sender}: {message}"})
-        except Exception as e:
-            logger.error(f"Error updating Last_Message: {e}")
+        record = records[0]
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {direction.upper()} ({msg_type}): {message}"
+        
+        current_log = record.get("fields", {}).get("Last_Message", "")
+        new_log = f"{current_log}\n{log_entry}".strip()
+        
+        self._update(record["id"], {"Last_Message": new_log})
 
-    def update_lead_info(self, phone: str, name: str, business_name: str):
-        """Update lead Name and Business_Name fields."""
-        if not self.table: return None
-        try:
-            formula = f"{{Phone number type}}='{phone}'"
-            records = self.table.all(formula=formula)
-            if records:
-                record_id = records[0]['id']
-                fields_to_update = {}
-                if name: fields_to_update["Name"] = name
-                if business_name: fields_to_update["Business_Name"] = business_name
-                
-                if fields_to_update:
-                    self.table.update(record_id, fields_to_update)
-                    logger.info(f"Updated info for {phone}: {fields_to_update}")
-        except Exception as e:
-            logger.error(f"Error updating lead info: {e}")
+    def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:
+        """Update Name and/or Business_Name fields if values are provided."""
+        records = self._search(f"{{Phone number type}}='{phone}'")
+        if not records:
+            return
+        fields = {}
+        if name:          fields["Name"]          = name
+        if business_name: fields["Business_Name"] = business_name
+        if fields:
+            self._update(records[0]["id"], fields)
+            logger.info(f"Lead info updated for {phone}: {fields}")
+
+
+class _TableShim:
+    """
+    Minimal shim so scraper.py can call `airtable.table.create(fields)` directly
+    without any pyairtable dependency.
+    """
+    def __init__(self, client: AirtableClient):
+        self._client = client
+
+    def create(self, fields: dict) -> dict | None:
+        return self._client._create(fields)
+
