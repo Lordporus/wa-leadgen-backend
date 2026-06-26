@@ -105,6 +105,33 @@ class AirtableClient:
             logger.info(f"Status updated → {status}: {phone}")
         return updated
 
+    def update_lead_status_by_id(self, record_id: str, status: str) -> dict | None:
+        """Update the Status field directly by Airtable record ID."""
+        updated = self._update(record_id, {"Status": status})
+        if updated:
+            logger.info(f"Status updated → {status}: record {record_id}")
+        return updated
+
+    def get_all_leads(self) -> list:
+        """Return all records from the leads table."""
+        return self._search("") if self.ok else []
+
+    def get_lead_by_id(self, record_id: str) -> dict | None:
+        """Return a single record by its Airtable record ID."""
+        if not self.ok:
+            return None
+        try:
+            resp = requests.get(
+                f"{self.base_url}/{record_id}",
+                headers=self.headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Airtable get_by_id error: {e}")
+            return None
+
     def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
         """Append a message to the Last_Message long text field (used as MVP message log)."""
         records = self._search(f"{{Phone number type}}='{phone}'")

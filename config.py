@@ -37,3 +37,7 @@ CLIENT_ID = int(os.getenv("CLIENT_ID", "1"))
 # approves the template (was hard-coded "pending approval" in Phase 6).
 FOLLOWUP_TEMPLATE_NAME = os.getenv("FOLLOWUP_TEMPLATE_NAME", "")
 DEFAULT_CLIENT_NAME = os.getenv("DEFAULT_CLIENT_NAME", "BuildWithPorus")
+
+# ── Dashboard API auth ────────────────────────────────────────────────────
+# Frontend sends X-API-Key header on every dashboard request.
+DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")

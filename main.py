@@ -1,12 +1,19 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Security, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
 import logging
 import hashlib
 import hmac
 import os
+import re
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
-from config import WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER, FOLLOWUP_TEMPLATE_NAME, CLIENT_ID
+from config import (
+    WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
+    FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, DASHBOARD_API_KEY,
+)
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
 from calendly_client import CalendlyClient
@@ -95,6 +102,271 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(title="WhatsApp Acquisition Backend", lifespan=lifespan)
+
+# ── CORS ──────────────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        os.getenv("FRONTEND_URL", ""),  # set in Render for production
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Dashboard API key auth ─────────────────────────────────────────────────
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def require_api_key(api_key: str = Security(_api_key_header)):
+    """Dependency: reject requests that don't carry the correct X-API-Key."""
+    if not DASHBOARD_API_KEY:
+        # Key not configured → open access (dev convenience; warn loudly).
+        logger.warning("DASHBOARD_API_KEY is not set — dashboard endpoints are unprotected!")
+        return
+    if api_key != DASHBOARD_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+
+# ── Dashboard helper utilities ─────────────────────────────────────────────
+
+DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+def _parse_created_at(raw: str) -> datetime | None:
+    """Try ISO 8601 and a few common date formats stored in Airtable."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:len(fmt)], fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+def _derive_score_breakdown(score: int) -> dict:
+    def cap(v): return max(0, min(100, v))
+    return {
+        "intent":     cap(score + 7),
+        "engagement": cap(score - 8),
+        "budget_fit": cap(score - 13),
+    }
+
+def _parse_city(last_message: str) -> str:
+    """Regex scan for common city mentions in the raw conversation log."""
+    cities = [
+        "Delhi", "Gurugram", "Noida", "Mumbai", "Bangalore", "Bengaluru",
+        "Hyderabad", "Chennai", "Pune", "Kolkata", "Jaipur", "Ahmedabad",
+    ]
+    for city in cities:
+        if re.search(rf"\b{city}\b", last_message, re.IGNORECASE):
+            return city
+    return "N/A"
+
+def _parse_interest(last_message: str) -> str:
+    """Regex scan for dental/medical treatment mentions."""
+    treatments = [
+        "teeth whitening", "whitening", "braces", "aligners", "implants",
+        "root canal", "cleaning", "crown", "veneer", "extraction",
+        "consultation", "checkup", "filling",
+    ]
+    lower = last_message.lower()
+    for t in treatments:
+        if t in lower:
+            return t.title()
+    return "N/A"
+
+def _parse_messages(last_message: str) -> list:
+    """
+    Parse the raw text log format:
+      [2026-06-24 10:03:00] INBOUND (text): Hello
+      [2026-06-24 10:03:10] OUTBOUND (text): Hi there!
+    into the frontend Message array format.
+    """
+    messages = []
+    pattern = re.compile(
+        r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+(INBOUND|OUTBOUND)\s+\([^)]+\):\s*(.*)",
+        re.IGNORECASE,
+    )
+    for i, line in enumerate(last_message.strip().splitlines()):
+        m = pattern.match(line.strip())
+        if not m:
+            continue
+        ts_raw, direction, text = m.group(1), m.group(2).upper(), m.group(3).strip()
+        try:
+            ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S")
+            time_str = ts.strftime("%I:%M %p").lstrip("0")
+        except ValueError:
+            time_str = ts_raw
+        messages.append({
+            "id": f"m{i}",
+            "role": "user" if direction == "INBOUND" else "ai",
+            "content": text,
+            "timestamp": time_str,
+        })
+    return messages
+
+def _format_lead_row(record: dict) -> dict:
+    """Map a raw Airtable record into the leads-list shape."""
+    fields = record.get("fields", {})
+    raw_score = fields.get("Lead_Score", 0)
+    try:
+        score = int(float(str(raw_score).strip() or "0"))
+    except (ValueError, TypeError):
+        score = 0
+
+    raw_created = fields.get("Created_At", "")
+    created_dt = _parse_created_at(raw_created)
+    created_str = created_dt.strftime("%b %d") if created_dt else "—"
+
+    # last_activity from most recent log line timestamp
+    last_msg = fields.get("Last_Message", "")
+    last_activity = "—"
+    if last_msg:
+        lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        if lines:
+            m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", lines[-1])
+            if m:
+                try:
+                    msg_dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    diff = datetime.now() - msg_dt
+                    if diff.seconds < 120:
+                        last_activity = "Just now"
+                    elif diff.seconds < 3600:
+                        last_activity = f"{diff.seconds // 60} min ago"
+                    elif diff.days == 0:
+                        last_activity = f"{diff.seconds // 3600} hr ago"
+                    else:
+                        last_activity = f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
+                except ValueError:
+                    pass
+
+    return {
+        "id":            record["id"],
+        "name":          fields.get("Name", "Unknown"),
+        "phone":         fields.get("Phone number type", ""),
+        "stage":         fields.get("Status", "New Lead"),
+        "score":         score,
+        "created_at":    created_str,
+        "last_activity": last_activity,
+    }
+
+
+# ── Pydantic request bodies ───────────────────────────────────────────────
+
+class StageUpdateBody(BaseModel):
+    stage: str
+
+
+# ── Dashboard endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/stats/dashboard", dependencies=[Depends(require_api_key)])
+def get_dashboard_stats():
+    """Aggregate lead counts and 7-day weekly activity from Airtable."""
+    try:
+        records = store.get_all_leads()
+    except Exception:
+        raise HTTPException(status_code=503, detail="data source unavailable")
+
+    total = booked = lost = 0
+    weekly: dict[str, dict] = {}
+
+    now = datetime.now()
+    for i in range(7):
+        day = (now - timedelta(days=6 - i)).strftime("%a")  # Mon, Tue …
+        weekly[day] = {"day": day, "newLeads": 0, "booked": 0}
+
+    for rec in records:
+        fields = rec.get("fields", {})
+        status = fields.get("Status", "")
+        total += 1
+        if status == "Booked":  booked += 1
+        if status == "Lost":    lost   += 1
+
+        raw_created = fields.get("Created_At", "")
+        created_dt = _parse_created_at(raw_created)
+        if created_dt and (now - created_dt).days < 7:
+            day_key = created_dt.strftime("%a")
+            if day_key in weekly:
+                weekly[day_key]["newLeads"] += 1
+                if status == "Booked":
+                    weekly[day_key]["booked"] += 1
+
+    conversion_rate = round((booked / total * 100)) if total else 0
+
+    return {
+        "total":           total,
+        "booked":          booked,
+        "lost":            lost,
+        "conversion_rate": conversion_rate,
+        "weekly":          list(weekly.values()),
+    }
+
+
+@app.get("/api/leads", dependencies=[Depends(require_api_key)])
+def list_leads(stage: str | None = None):
+    """Return all leads, optionally filtered by pipeline stage."""
+    try:
+        if stage:
+            records = store._search(f"{{Status}}='{stage}'")
+        else:
+            records = store.get_all_leads()
+    except Exception:
+        raise HTTPException(status_code=503, detail="data source unavailable")
+
+    return [_format_lead_row(r) for r in records]
+
+
+@app.get("/api/leads/{lead_id}", dependencies=[Depends(require_api_key)])
+def get_lead_detail(lead_id: str):
+    """Return a single lead with full conversation history."""
+    try:
+        record = store.get_lead_by_id(lead_id)
+    except Exception:
+        raise HTTPException(status_code=503, detail="data source unavailable")
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    fields = record.get("fields", {})
+    last_msg = fields.get("Last_Message", "")
+
+    raw_score = fields.get("Lead_Score", 0)
+    try:
+        score = int(float(str(raw_score).strip() or "0"))
+    except (ValueError, TypeError):
+        score = 0
+
+    raw_created = fields.get("Created_At", "")
+    created_dt = _parse_created_at(raw_created)
+    created_str = created_dt.strftime("%b %d, %Y") if created_dt else "—"
+
+    return {
+        "id":              record["id"],
+        "name":            fields.get("Name", "Unknown"),
+        "phone":           fields.get("Phone number type", ""),
+        "city":            _parse_city(last_msg),
+        "interest":        _parse_interest(last_msg),
+        "stage":           fields.get("Status", "New Lead"),
+        "score":           score,
+        "score_breakdown": _derive_score_breakdown(score),
+        "created_at":      created_str,
+        "messages":        _parse_messages(last_msg),
+    }
+
+
+@app.patch("/api/leads/{lead_id}/stage", dependencies=[Depends(require_api_key)])
+def update_lead_stage(lead_id: str, body: StageUpdateBody):
+    """Update the pipeline stage for a lead by Airtable record ID."""
+    valid_stages = {"New Lead", "Contacted", "Qualified", "Booked", "Lost"}
+    if body.stage not in valid_stages:
+        raise HTTPException(status_code=422, detail=f"Invalid stage. Must be one of: {valid_stages}")
+    try:
+        result = store.update_lead_status_by_id(lead_id, body.stage)
+    except Exception:
+        raise HTTPException(status_code=503, detail="data source unavailable")
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Lead not found or update failed")
+
+    return {"success": True, "stage": body.stage}
 
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""

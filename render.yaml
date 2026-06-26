@@ -34,3 +34,8 @@ services:
         value: 1          # override per Render service for each new client
       - key: FOLLOWUP_TEMPLATE_NAME
         sync: false       # set once Meta approves the follow-up template
+      # ── Dashboard API ──
+      - key: DASHBOARD_API_KEY
+        sync: false       # secret key; frontend sends as X-API-Key header
+      - key: FRONTEND_URL
+        sync: false       # e.g. https://your-dashboard.vercel.app (for CORS)

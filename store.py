@@ -54,6 +54,12 @@ class DualWriteStore:
     def get_lead(self, phone: str) -> dict | None:
         return self._primary.get_lead(phone)
 
+    def get_all_leads(self) -> list:
+        return self._primary.get_all_leads()
+
+    def get_lead_by_id(self, record_id: str) -> dict | None:
+        return self._primary.get_lead_by_id(record_id)
+
     # ── writes (both; secondary failures contained) ───────────────────────
 
     def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
@@ -65,6 +71,10 @@ class DualWriteStore:
         result = self._primary.update_lead_status(phone, status)
         self._safe(lambda: self._secondary.update_lead_status(phone, status), "update_lead_status", phone)
         return result
+
+    def update_lead_status_by_id(self, record_id: str, status: str) -> dict | None:
+        # Only primary — Postgres secondary doesn't track Airtable record IDs.
+        return self._primary.update_lead_status_by_id(record_id, status)
 
     def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
         self._primary.append_message(phone, direction, message, msg_type)
