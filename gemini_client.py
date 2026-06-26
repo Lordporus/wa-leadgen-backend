@@ -10,7 +10,7 @@ if GEMINI_API_KEY:
 else:
     logger.warning("GEMINI_API_KEY not found. AI responses will fail.")
 
-SYSTEM_PROMPT = """
+DEFAULT_SYSTEM_PROMPT = """
 Tum Team BuildWithPorus ke AI sales assistant ho — ek B2B marketing agency jo dentists ko WhatsApp aur AI automation ke through naye patient leads dilate hai, bina expensive ads ke.
 
 TONE: Friendly, confident, sales-driven Hinglish. Short messages, WhatsApp-style (maximum 2-3 lines). Emojis sparingly use karo. Corporate ya robotic bilkul nahi lagna chahiye.
@@ -43,8 +43,15 @@ IMPORTANT: Hamesha conversation naturally lead karo, question by question.
 """
 
 class GeminiClient:
-    def __init__(self):
+    def __init__(self, system_prompt: str | None = None):
+        """
+        Initialise the Gemini client.
+
+        system_prompt: per-client sales persona loaded by tenant.py.
+                       Falls back to DEFAULT_SYSTEM_PROMPT when None/empty.
+        """
         self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self._system_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
         
     def parse_conversation_history(self, history_text: str):
         """
@@ -75,11 +82,11 @@ class GeminiClient:
     def generate_response_with_history(self, parsed_history: list, user_message: str) -> str:
         try:
             gemini_history = [
-                {"role": "user", "parts": [SYSTEM_PROMPT]},
+                {"role": "user", "parts": [self._system_prompt]},
                 {"role": "model", "parts": ["Understood. I will act as the sales assistant in Hinglish."]}
             ]
             gemini_history.extend(parsed_history)
-            
+
             chat = self.model.start_chat(history=gemini_history)
             response = chat.send_message(user_message)
             return response.text

@@ -24,3 +24,13 @@ services:
         sync: false
       - key: APIFY_API_TOKEN
         sync: false
+      # ── Phase 7: Postgres migration ──
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATION_MODE
+        value: airtable   # airtable | dual | postgres
+      # ── Phase 8: Multi-tenant ──
+      - key: CLIENT_ID
+        value: 1          # override per Render service for each new client
+      - key: FOLLOWUP_TEMPLATE_NAME
+        sync: false       # set once Meta approves the follow-up template

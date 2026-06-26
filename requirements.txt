@@ -6,3 +6,6 @@ python-dotenv==1.0.0
 google-generativeai==0.3.0
 apify-client==1.4.1
 apscheduler==3.10.4
+sqlalchemy>=2.0,<2.1
+psycopg2-binary>=2.9
+alembic>=1.13

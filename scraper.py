@@ -22,7 +22,7 @@ import logging
 from datetime import datetime
 from apify_client import ApifyClient
 from config import APIFY_API_TOKEN
-from airtable_client import AirtableClient
+from store import get_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,11 +62,11 @@ def clean_phone(raw: str) -> str | None:
 
 
 # ─────────────────────────────────────────────
-# DEDUPLICATION (against Airtable)
+# DEDUPLICATION (against the active lead store)
 # ─────────────────────────────────────────────
-def is_duplicate(phone: str, airtable: AirtableClient) -> bool:
-    """Return True if phone already exists in the Leads table."""
-    return airtable.get_lead(phone) is not None
+def is_duplicate(phone: str, store) -> bool:
+    """Return True if phone already exists in the leads store."""
+    return store.get_lead(phone) is not None
 
 
 # ─────────────────────────────────────────────
@@ -143,41 +143,39 @@ def clean_leads(raw_leads: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────
 # STORAGE
 # ─────────────────────────────────────────────
-def store_leads(leads: list[dict], airtable: AirtableClient) -> tuple[int, int]:
+def store_leads(leads: list[dict], store) -> tuple[int, int]:
     """
-    Push cleaned leads to Airtable, skipping duplicates.
+    Push cleaned leads to the active store, skipping duplicates.
     Returns (added, skipped) counts.
     """
     added = skipped = 0
     for lead in leads:
         phone = lead["phone"]
-        if is_duplicate(phone, airtable):
+        if is_duplicate(phone, store):
             logger.info(f"Duplicate skipped: {lead['name']} ({phone})")
             skipped += 1
             continue
 
-        record_fields = {
-            "Name":              lead["name"],
-            "Phone number type": phone,
-            "Source":            lead["source_label"],
-            "Status":            "New Lead",
-            "Business_Name":     lead["name"],     # same as name for scraped records
-            "Created_At":        datetime.now().isoformat(),
-        }
-        # Optionally store address as part of Business_Name if we add that field later
-        # For now: enrich Last_Message with address/rating context
+        record = store.add_lead(
+            name=lead["name"],
+            phone=phone,
+            source=lead["source_label"],
+        )
+        if not record:
+            logger.error(f"Failed to store {lead['name']} ({phone})")
+            continue
+
+        # Enrich: stash address/rating as a seed system message on the lead.
+        # (Mirrors the old Airtable Last_Message context line.)
         if lead.get("address") or lead.get("rating"):
             parts = []
             if lead.get("address"):   parts.append(f"📍 {lead['address']}")
             if lead.get("rating"):    parts.append(f"⭐ {lead['rating']} ({lead.get('review_count', 0)} reviews)")
-            record_fields["Last_Message"] = "Scraped: " + " | ".join(parts)
+            store.append_message(phone, direction="system",
+                                 message="Scraped: " + " | ".join(parts), msg_type="system")
 
-        try:
-            airtable.table.create(record_fields)
-            logger.info(f"✅ Added: {lead['name']} ({phone})")
-            added += 1
-        except Exception as e:
-            logger.error(f"Failed to store {lead['name']}: {e}")
+        logger.info(f"✅ Added: {lead['name']} ({phone})")
+        added += 1
 
     return added, skipped
 
@@ -206,9 +204,9 @@ def get_leads_from_source(source_name: str, query: str = NICHE_QUERY, max_result
         logger.error(f"Unknown source: '{source_name}'. Available: {list(SOURCE_REGISTRY.keys())}")
         return
 
-    airtable = AirtableClient()
-    if not airtable.table:
-        logger.error("Airtable not configured — cannot store leads.")
+    airtable = get_store()
+    if not getattr(airtable, "table", None):
+        logger.error("Lead store not configured — cannot store leads.")
         return
 
     fetch_fn = SOURCE_REGISTRY[source_name]
