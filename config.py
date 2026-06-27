@@ -41,3 +41,9 @@ DEFAULT_CLIENT_NAME = os.getenv("DEFAULT_CLIENT_NAME", "BuildWithPorus")
 # ── Dashboard API auth ────────────────────────────────────────────────────
 # Frontend sends X-API-Key header on every dashboard request.
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
+
+# ── Inbound lead creation guard ───────────────────────────────────────────
+# Numbers in this list will be silently dropped and never auto-created as
+# leads. Add spam callers or known bot numbers here as plain strings
+# (no + prefix needed, normalisation is done at call-site).
+BLOCKED_NUMBERS: list[str] = []

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
-    FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, DASHBOARD_API_KEY,
+    FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, DASHBOARD_API_KEY, BLOCKED_NUMBERS,
 )
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
@@ -441,8 +441,35 @@ async def receive_message(request: Request):
                             
                             lead = store.get_lead(sender_phone)
                             if not lead:
-                                logger.info(f"Message from unknown number {sender_phone}. Logging and ignoring.")
-                                continue
+                                # ── Guard 1: Meta test numbers (start with 1555) ──
+                                if sender_phone and sender_phone.lstrip('+').startswith('1555'):
+                                    logger.info(f"Ignored Meta test number: {sender_phone}")
+                                    continue
+
+                                # ── Guard 2: Manually blocked numbers ────────────
+                                normalized_sender_clean = sender_phone.replace('+', '').replace(' ', '').replace('-', '') if sender_phone else ''
+                                blocked_clean = [n.replace('+', '').replace(' ', '').replace('-', '') for n in BLOCKED_NUMBERS]
+                                if normalized_sender_clean in blocked_clean:
+                                    logger.info(f"Ignored blocked number: {sender_phone}")
+                                    continue
+
+                                # ── Auto-create new inbound lead ─────────────────
+                                logger.info(f"New unknown number {sender_phone} — creating lead automatically.")
+                                new_record = store.add_lead(
+                                    name="Unknown",
+                                    phone=sender_phone,
+                                    source="Inbound WhatsApp",
+                                )
+                                if not new_record:
+                                    logger.error(f"Failed to create lead for {sender_phone}. Dropping message.")
+                                    continue
+
+                                # Re-fetch so `lead` has the full Airtable record shape
+                                # (same structure that get_lead() returns)
+                                lead = store.get_lead(sender_phone)
+                                if not lead:
+                                    logger.error(f"Lead created but not retrievable for {sender_phone}. Dropping message.")
+                                    continue
                                 
                             # If matched: log message
                             store.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text")
