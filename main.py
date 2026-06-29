@@ -209,10 +209,14 @@ def _parse_messages(last_message: str) -> list:
 def _format_lead_row(record: dict) -> dict:
     """Map a raw Airtable record into the leads-list shape."""
     fields = record.get("fields", {})
-    raw_score = fields.get("Lead_Score") or 0
-    try:
-        score = int(float(raw_score))
-    except (ValueError, TypeError):
+    raw_score = str(fields.get("Lead_Score", "")).strip().lower()
+    if raw_score == "hot":
+        score = 90
+    elif raw_score == "warm":
+        score = 50
+    elif raw_score == "cold":
+        score = 10
+    else:
         score = 0
 
     raw_created = fields.get("Created_At", "")
@@ -342,10 +346,14 @@ def get_lead_detail(lead_id: str):
     fields = record.get("fields", {})
     last_msg = fields.get("Last_Message", "")
 
-    raw_score = fields.get("Lead_Score") or 0
-    try:
-        score = int(float(raw_score))
-    except (ValueError, TypeError):
+    raw_score = str(fields.get("Lead_Score", "")).strip().lower()
+    if raw_score == "hot":
+        score = 90
+    elif raw_score == "warm":
+        score = 50
+    elif raw_score == "cold":
+        score = 10
+    else:
         score = 0
 
     raw_created = fields.get("Created_At", "")
