@@ -209,9 +209,9 @@ def _parse_messages(last_message: str) -> list:
 def _format_lead_row(record: dict) -> dict:
     """Map a raw Airtable record into the leads-list shape."""
     fields = record.get("fields", {})
-    raw_score = fields.get("Lead_Score", 0)
+    raw_score = fields.get("Lead_Score") or 0
     try:
-        score = int(float(str(raw_score).strip() or "0"))
+        score = int(float(raw_score))
     except (ValueError, TypeError):
         score = 0
 
@@ -241,6 +241,16 @@ def _format_lead_row(record: dict) -> dict:
                 except ValueError:
                     pass
 
+    # last_message: plain-text preview of the most recent message (≤80 chars)
+    last_message_preview = ""
+    if last_msg:
+        log_lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        if log_lines:
+            # Strip the "[YYYY-MM-DD HH:MM:SS] DIRECTION (type): " prefix
+            raw_line = log_lines[-1]
+            parts = raw_line.split("): ", 1)
+            last_message_preview = (parts[1] if len(parts) > 1 else raw_line).strip()[:80]
+
     return {
         "id":            record["id"],
         "name":          fields.get("Name", "Unknown"),
@@ -249,6 +259,7 @@ def _format_lead_row(record: dict) -> dict:
         "score":         score,
         "created_at":    created_str,
         "last_activity": last_activity,
+        "last_message":  last_message_preview,
     }
 
 
@@ -331,9 +342,9 @@ def get_lead_detail(lead_id: str):
     fields = record.get("fields", {})
     last_msg = fields.get("Last_Message", "")
 
-    raw_score = fields.get("Lead_Score", 0)
+    raw_score = fields.get("Lead_Score") or 0
     try:
-        score = int(float(str(raw_score).strip() or "0"))
+        score = int(float(raw_score))
     except (ValueError, TypeError):
         score = 0
 
