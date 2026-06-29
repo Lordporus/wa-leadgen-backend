@@ -12,6 +12,11 @@ WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# ── 9Router (OpenAI-compatible LLM gateway) ──────────────────────────────
+NINEROUTER_API_KEY = os.getenv("NINEROUTER_API_KEY", "")
+NINEROUTER_BASE_URL = os.getenv("NINEROUTER_BASE_URL", "http://13.234.20.175:20128/v1")
+NINEROUTER_MODEL = os.getenv("NINEROUTER_MODEL", "wa-leadgen-backend-fallback-chain")
+
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")

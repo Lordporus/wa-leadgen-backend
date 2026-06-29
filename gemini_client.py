@@ -1,14 +1,32 @@
 import google.generativeai as genai
+from openai import OpenAI
 import logging
-from config import GEMINI_API_KEY
+from config import (
+    GEMINI_API_KEY,
+    NINEROUTER_API_KEY,
+    NINEROUTER_BASE_URL,
+    NINEROUTER_MODEL,
+)
 
 logger = logging.getLogger(__name__)
 
-# Configure Gemini
+# Configure Gemini (fallback)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
-    logger.warning("GEMINI_API_KEY not found. AI responses will fail.")
+    logger.warning("GEMINI_API_KEY not found. Direct-Gemini fallback won't work.")
+
+# Configure 9Router (primary)
+_router_client: OpenAI | None = None
+if NINEROUTER_API_KEY:
+    _router_client = OpenAI(
+        api_key=NINEROUTER_API_KEY,
+        base_url=NINEROUTER_BASE_URL,
+        timeout=15,
+    )
+    logger.info(f"9Router configured → {NINEROUTER_BASE_URL} model={NINEROUTER_MODEL}")
+else:
+    logger.warning("NINEROUTER_API_KEY not set. Will use direct Gemini only.")
 
 DEFAULT_SYSTEM_PROMPT = """
 Tum Team BuildWithPorus ke AI sales assistant ho — ek B2B marketing agency jo dentists ko WhatsApp aur AI automation ke through naye patient leads dilate hai, bina expensive ads ke.
@@ -50,7 +68,7 @@ class GeminiClient:
         system_prompt: per-client sales persona loaded by tenant.py.
                        Falls back to DEFAULT_SYSTEM_PROMPT when None/empty.
         """
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self._fallback_model = genai.GenerativeModel('gemini-2.5-flash')
         self._system_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
         
     def parse_conversation_history(self, history_text: str):
@@ -80,6 +98,26 @@ class GeminiClient:
         return history
 
     def generate_response_with_history(self, parsed_history: list, user_message: str) -> str:
+        # ── Primary: 9Router ──
+        if _router_client:
+            try:
+                messages = [{"role": "system", "content": self._system_prompt}]
+                for turn in parsed_history:
+                    role = "assistant" if turn["role"] == "model" else "user"
+                    messages.append({"role": role, "content": turn["parts"][0]})
+                messages.append({"role": "user", "content": user_message})
+
+                resp = _router_client.chat.completions.create(
+                    model=NINEROUTER_MODEL,
+                    messages=messages,
+                )
+                reply = resp.choices[0].message.content
+                logger.info(f"9Router OK — model_used={resp.model}")
+                return reply
+            except Exception as e:
+                logger.warning(f"9Router failed ({e}), falling back to direct Gemini")
+
+        # ── Fallback: direct Gemini SDK ──
         try:
             gemini_history = [
                 {"role": "user", "parts": [self._system_prompt]},
@@ -87,11 +125,12 @@ class GeminiClient:
             ]
             gemini_history.extend(parsed_history)
 
-            chat = self.model.start_chat(history=gemini_history)
+            chat = self._fallback_model.start_chat(history=gemini_history)
             response = chat.send_message(user_message)
+            logger.info("Direct Gemini fallback OK")
             return response.text
         except Exception as e:
-            logger.error(f"Gemini API error: {e}")
+            logger.error(f"Both 9Router and direct Gemini failed: {e}")
             return "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
 
     def extract_lead_info(self, text: str):
@@ -101,9 +140,25 @@ class GeminiClient:
         If a value is not found, use null.
         Text: "{text}"
         """
+        import json
+
+        # ── Primary: 9Router ──
+        if _router_client:
+            try:
+                resp = _router_client.chat.completions.create(
+                    model=NINEROUTER_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = resp.choices[0].message.content
+                content = content.replace("```json", "").replace("```", "").strip()
+                logger.info(f"9Router extract OK — model_used={resp.model}")
+                return json.loads(content)
+            except Exception as e:
+                logger.warning(f"9Router extract failed ({e}), falling back to direct Gemini")
+
+        # ── Fallback: direct Gemini SDK ──
         try:
-            response = self.model.generate_content(prompt)
-            import json
+            response = self._fallback_model.generate_content(prompt)
             content = response.text.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
@@ -123,12 +178,27 @@ class GeminiClient:
         Conversation:
         {conversation_text}
         """
+
+        def _clean_score(raw: str) -> str:
+            score = raw.strip().replace('"', '').replace('.', '').capitalize()
+            return score if score in ["Cold", "Warm", "Hot"] else "Cold"
+
+        # ── Primary: 9Router ──
+        if _router_client:
+            try:
+                resp = _router_client.chat.completions.create(
+                    model=NINEROUTER_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                logger.info(f"9Router score OK — model_used={resp.model}")
+                return _clean_score(resp.choices[0].message.content)
+            except Exception as e:
+                logger.warning(f"9Router score failed ({e}), falling back to direct Gemini")
+
+        # ── Fallback: direct Gemini SDK ──
         try:
-            response = self.model.generate_content(prompt)
-            score = response.text.strip().replace('"', '').replace('.', '').capitalize()
-            if score in ["Cold", "Warm", "Hot"]:
-                return score
-            return "Cold"
+            response = self._fallback_model.generate_content(prompt)
+            return _clean_score(response.text)
         except Exception as e:
             logger.error(f"Scoring error: {e}")
             return "Cold"
