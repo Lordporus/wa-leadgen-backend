@@ -84,19 +84,19 @@ def calendly_sync_job():
         lead = store.get_lead(phone)
         if lead:
             current_status = lead.get("fields", {}).get("Status")
-            if current_status == "Qualified":
+            if current_status not in ("Booked", "Lost"):
                 store.update_lead_status(phone, "Booked")
                 store.append_message(phone, "system", f"Calendly Booking Confirmed for {booking.get('start_time')}", "system")
                 if LORD_PHONE_NUMBER:
                     whatsapp.send_message(LORD_PHONE_NUMBER, f"📅 BOOKED: {booking.get('name')} booked a call for {booking.get('start_time')}")
             else:
-                logger.info(f"Matched booking for {phone} but lead status is {current_status}, not Qualified.")
+                logger.info(f"Matched booking for {phone} but lead status is {current_status}, skipping update.")
         else:
             logger.info(f"Unmatched booking (phone {phone} not in Leads): {booking.get('name')}")
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(follow_up_job, 'interval', hours=1)
-scheduler.add_job(calendly_sync_job, 'interval', hours=1)
+scheduler.add_job(calendly_sync_job, 'interval', minutes=5)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
