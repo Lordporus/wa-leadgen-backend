@@ -37,6 +37,9 @@ _lost_stages = tenant.get_lost_stage_names(CLIENT_ID)  # e.g. ['Lost']
 
 logger.info(f"Phase 8 tenant config: client_id={CLIENT_ID} won={_won_stages} lost={_lost_stages}")
 
+# ── Deduplication: prevent re-processing when Meta retries webhooks ────────
+_processed_message_ids: set[str] = set()
+
 def follow_up_job():
     """Hourly job: nudge leads stuck in 'Contacted' for >48h."""
     logger.info("Running hourly follow-up job...")
@@ -434,7 +437,16 @@ async def receive_message(request: Request):
                         if normalized_lord and normalized_sender == normalized_lord:
                             logger.warning(f"Ignored: message from LORD_PHONE_NUMBER ({sender_phone}) — loop guard triggered.")
                             continue
-                        
+
+                        # ── Dedup guard: skip messages already processed ──
+                        msg_id = message.get("id", "")
+                        if msg_id in _processed_message_ids:
+                            logger.info(f"Duplicate message {msg_id} from {sender_phone}, skipping")
+                            continue
+                        if len(_processed_message_ids) > 1000:
+                            _processed_message_ids.clear()
+                        _processed_message_ids.add(msg_id)
+
                         if message_type == "text":
                             user_text = message["text"]["body"]
                             logger.info(f"Received message from {sender_phone}: {user_text}")
