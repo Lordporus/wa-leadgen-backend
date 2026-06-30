@@ -76,11 +76,18 @@ class DualWriteStore:
         # Only primary — Postgres secondary doesn't track Airtable record IDs.
         return self._primary.update_lead_status_by_id(record_id, status)
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
-        self._primary.append_message(phone, direction, message, msg_type)
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> None:
+        self._primary.append_message(phone, direction, message, msg_type, wa_message_id)
         self._safe(
-            lambda: self._secondary.append_message(phone, direction, message, msg_type),
+            lambda: self._secondary.append_message(phone, direction, message, msg_type, wa_message_id),
             "append_message", phone,
+        )
+
+    def update_message_status(self, wa_message_id: str, status: str) -> None:
+        # Airtable doesn't support message-level statuses right now. We just proxy to Postgres.
+        self._safe(
+            lambda: self._secondary.update_message_status(wa_message_id, status),
+            "update_message_status", wa_message_id,
         )
 
     def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:

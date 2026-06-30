@@ -19,6 +19,8 @@ from gemini_client import GeminiClient
 from calendly_client import CalendlyClient
 from store import get_store
 import tenant
+from database import SessionLocal
+from models import Client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +38,16 @@ _won_stages  = tenant.get_won_stage_names(CLIENT_ID)   # e.g. ['Booked']
 _lost_stages = tenant.get_lost_stage_names(CLIENT_ID)  # e.g. ['Lost']
 
 logger.info(f"Phase 8 tenant config: client_id={CLIENT_ID} won={_won_stages} lost={_lost_stages}")
+
+# ── Pydantic request bodies ───────────────────────────────────────────────
+
+class StageUpdateBody(BaseModel):
+    stage: str
+
+class SettingsUpdateBody(BaseModel):
+    system_prompt: str | None = None
+    calendly_link: str | None = None
+    wa_phone_number_id: str | None = None
 
 # ── Deduplication: prevent re-processing when Meta retries webhooks ────────
 _processed_message_ids: set[str] = set()
@@ -106,6 +118,57 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="WhatsApp Acquisition Backend", lifespan=lifespan)
 
+# ── Dashboard API key auth ─────────────────────────────────────────────────
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def require_api_key(api_key: str = Security(_api_key_header)):
+    """Dependency: reject requests that don't carry the correct X-API-Key."""
+    if not DASHBOARD_API_KEY:
+        # Key not configured → open access (dev convenience; warn loudly).
+        logger.warning("DASHBOARD_API_KEY is not set — dashboard endpoints are unprotected!")
+        return
+    if api_key != DASHBOARD_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+
+@app.get("/api/settings", dependencies=[Depends(require_api_key)])
+def get_settings():
+    if not SessionLocal:
+        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
+    with SessionLocal() as s:
+        client = s.query(Client).filter(Client.id == CLIENT_ID).first()
+        if not client:
+            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
+        return {
+            "system_prompt": client.system_prompt or "",
+            "calendly_link": client.calendly_link or "",
+            "wa_phone_number_id": client.wa_phone_number_id or ""
+        }
+
+@app.patch("/api/settings", dependencies=[Depends(require_api_key)])
+def update_settings(body: SettingsUpdateBody):
+    if not SessionLocal:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    with SessionLocal() as s:
+        client = s.query(Client).filter(Client.id == CLIENT_ID).first()
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+        
+        if body.system_prompt is not None:
+            client.system_prompt = body.system_prompt
+        if body.calendly_link is not None:
+            client.calendly_link = body.calendly_link
+        if body.wa_phone_number_id is not None:
+            client.wa_phone_number_id = body.wa_phone_number_id
+        
+        s.commit()
+    
+    # Hot-reload gemini with new prompt
+    global gemini
+    _active = tenant.load_client(CLIENT_ID)
+    gemini = tenant.get_gemini_for_client(_active)
+    
+    return {"success": True}
+
 # ── CORS ──────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
@@ -118,18 +181,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Dashboard API key auth ─────────────────────────────────────────────────
-_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-def require_api_key(api_key: str = Security(_api_key_header)):
-    """Dependency: reject requests that don't carry the correct X-API-Key."""
-    if not DASHBOARD_API_KEY:
-        # Key not configured → open access (dev convenience; warn loudly).
-        logger.warning("DASHBOARD_API_KEY is not set — dashboard endpoints are unprotected!")
-        return
-    if api_key != DASHBOARD_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 # ── Dashboard helper utilities ─────────────────────────────────────────────
 
@@ -265,14 +316,6 @@ def _format_lead_row(record: dict) -> dict:
         "last_activity": last_activity,
         "last_message":  last_message_preview,
     }
-
-
-# ── Pydantic request bodies ───────────────────────────────────────────────
-
-class StageUpdateBody(BaseModel):
-    stage: str
-
-
 # ── Dashboard endpoints ───────────────────────────────────────────────────
 
 @app.get("/api/stats/dashboard", dependencies=[Depends(require_api_key)])
@@ -372,6 +415,42 @@ def get_lead_detail(lead_id: str):
         "created_at":      created_str,
         "messages":        _parse_messages(last_msg),
     }
+
+@app.get("/api/leads/{lead_id}/messages", dependencies=[Depends(require_api_key)])
+def get_lead_messages(lead_id: str):
+    """Return all messages for a lead from the Postgres Message table."""
+    try:
+        record = store.get_lead_by_id(lead_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Lead not found")
+            
+        phone = record.get("fields", {}).get("Phone number type")
+        if not phone:
+            return []
+            
+        if not SessionLocal:
+            return []
+            
+        from models import Lead, Message
+        with SessionLocal() as s:
+            lead = s.query(Lead).filter(Lead.phone == phone).first()
+            if not lead:
+                return []
+            
+            msgs = s.query(Message).filter(Message.lead_id == lead.id).order_by(Message.created_at).all()
+            return [
+                {
+                    "id": f"m{m.id}",
+                    "role": "user" if m.direction == "INBOUND" else "ai",
+                    "content": m.body or "",
+                    "timestamp": m.created_at.strftime("%I:%M %p").lstrip("0") if m.created_at else "",
+                    "status": m.status,
+                }
+                for m in msgs
+            ]
+    except Exception as e:
+        logger.error(f"Error fetching messages for lead {lead_id}: {e}")
+        return []
 
 
 @app.patch("/api/leads/{lead_id}/stage", dependencies=[Depends(require_api_key)])
@@ -518,8 +597,8 @@ async def receive_message(request: Request):
                             parsed_history = gemini.parse_conversation_history(last_message)
                             
                             ai_reply = gemini.generate_response_with_history(parsed_history, user_text)
-                            whatsapp.send_message(sender_phone, ai_reply)
-                            store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text")
+                            wamid = whatsapp.send_message(sender_phone, ai_reply)
+                            store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid)
                             
                             # Refresh lead to score the full conversation including the outbound message
                             lead_after_reply = store.get_lead(sender_phone)
@@ -565,7 +644,10 @@ async def receive_message(request: Request):
                 # Check for message status updates (delivered/read)
                 elif "statuses" in value:
                     for status in value["statuses"]:
-                        logger.info(f"Message {status['id']} to {status['recipient_id']} status: {status['status']}")
+                        wamid = status["id"]
+                        status_str = status["status"]
+                        logger.info(f"Message {wamid} to {status['recipient_id']} status: {status_str}")
+                        store.update_message_status(wamid, status_str)
                             
         return {"status": "success"}
     return {"status": "ignored"}

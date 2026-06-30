@@ -113,6 +113,8 @@ class Message(Base):
     direction: Mapped[str] = mapped_column(String(10), nullable=False)  # INBOUND/OUTBOUND/SYSTEM
     msg_type: Mapped[str] = mapped_column(String(20), default="text")
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wa_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )

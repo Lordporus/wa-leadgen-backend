@@ -132,7 +132,7 @@ class AirtableClient:
             logger.error(f"Airtable get_by_id error: {e}")
             return None
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> None:
         """Append a message to the Last_Message long text field (used as MVP message log)."""
         records = self._search(f"{{Phone number type}}='{phone}'")
         if not records:

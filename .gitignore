@@ -11,3 +11,14 @@ venv.bak/
 __pycache__/
 *.py[cod]
 *$py.class
+.claude/
+.gemini/
+.codegraph/
+.mcp.json
+AGENTS.md
+GEMINI.md
+opencode.jsonc
+_find_region.py
+test_*.py
+*.html
+v2_upgrade.md

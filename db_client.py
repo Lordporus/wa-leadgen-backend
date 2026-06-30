@@ -184,7 +184,7 @@ class DatabaseClient:
             logger.error(f"Postgres update_lead_status error: {e}")
             return None
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text") -> None:
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> None:
         """Append a message row for this lead (normalised; replaces text-blob)."""
         if not self.ok:
             return
@@ -198,6 +198,7 @@ class DatabaseClient:
                     direction=direction.upper(),
                     msg_type=msg_type,
                     body=message,
+                    wa_message_id=wa_message_id,
                 ))
                 row.updated_at = datetime.utcnow()
                 s.commit()
@@ -226,6 +227,20 @@ class DatabaseClient:
                     logger.info(f"Lead info updated for {phone}: name={name}, business={business_name}")
         except SQLAlchemyError as e:
             logger.error(f"Postgres update_lead_info error: {e}")
+
+    def update_message_status(self, wa_message_id: str, status: str) -> None:
+        """Update delivery status of a WhatsApp message."""
+        if not self.ok:
+            return
+        try:
+            with self._session() as s:
+                row = s.execute(select(Message).where(Message.wa_message_id == wa_message_id)).scalar_one_or_none()
+                if row:
+                    row.status = status
+                    s.commit()
+                    logger.info(f"Message {wa_message_id} status updated to {status}")
+        except SQLAlchemyError as e:
+            logger.error(f"Postgres update_message_status error: {e}")
 
     def update_lead_score(self, phone: str, score: str) -> None:
         """Update Lead_Score field."""

@@ -38,7 +38,7 @@ class WhatsAppClient:
         self.sends_today += 1
         return True
 
-    def send_message(self, to_phone: str, text: str) -> dict | None:
+    def send_message(self, to_phone: str, text: str) -> str | None:
         if not self._check_rate_limit():
             return None
             
@@ -61,14 +61,15 @@ class WhatsAppClient:
             response = requests.post(self.base_url, headers=headers, json=payload)
             response.raise_for_status()
             logger.info(f"Text message sent to {to_phone}.")
-            return response.json()
+            data = response.json()
+            return data.get("messages", [{}])[0].get("id")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send message to {to_phone}: {e}")
             if e.response is not None:
                 logger.error(f"Error details: {e.response.text}")
             return None
 
-    def send_template(self, to_phone: str, template_name: str, language_code: str = "en") -> dict | None:
+    def send_template(self, to_phone: str, template_name: str, language_code: str = "en") -> str | None:
         """Send a pre-approved template message (required for initial outbound outreach)."""
         if not self._check_rate_limit():
             return None
@@ -94,7 +95,8 @@ class WhatsAppClient:
             response = requests.post(self.base_url, headers=headers, json=payload)
             response.raise_for_status()
             logger.info(f"Template '{template_name}' sent to {to_phone}.")
-            return response.json()
+            data = response.json()
+            return data.get("messages", [{}])[0].get("id")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send template to {to_phone}: {e}")
             if e.response is not None:
