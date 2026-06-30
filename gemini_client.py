@@ -1,6 +1,7 @@
 import google.generativeai as genai
 from openai import OpenAI
 import logging
+from datetime import datetime, timezone, timedelta
 from config import (
     GEMINI_API_KEY,
     NINEROUTER_API_KEY,
@@ -58,6 +59,9 @@ User: "How does this work"
 AI: "Hum aapke local area mein potential patients ko identify karte hain aur WhatsApp automation ke through unhe aapke clinic se connect karte hain. Kya main aapke clinic ke liye ek free strategy call arrange karun?"
 
 IMPORTANT: Hamesha conversation naturally lead karo, question by question.
+
+Aaj ki date hai: [Current Date].
+Current time hai: [Current Time].
 """
 
 class GeminiClient:
@@ -98,10 +102,21 @@ class GeminiClient:
         return history
 
     def generate_response_with_history(self, parsed_history: list, user_message: str) -> str:
+        # Generate current IST time
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist)
+        
+        current_date_str = now_ist.strftime("%d %B %Y")
+        current_time_str = now_ist.strftime("%I:%M %p")
+        
+        # Dynamically inject into a copy of the system prompt
+        active_prompt = self._system_prompt.replace("[Current Date]", current_date_str)
+        active_prompt = active_prompt.replace("[Current Time]", current_time_str)
+
         # ── Primary: 9Router ──
         if _router_client:
             try:
-                messages = [{"role": "system", "content": self._system_prompt}]
+                messages = [{"role": "system", "content": active_prompt}]
                 for turn in parsed_history:
                     role = "assistant" if turn["role"] == "model" else "user"
                     messages.append({"role": role, "content": turn["parts"][0]})
@@ -120,7 +135,7 @@ class GeminiClient:
         # ── Fallback: direct Gemini SDK ──
         try:
             gemini_history = [
-                {"role": "user", "parts": [self._system_prompt]},
+                {"role": "user", "parts": [active_prompt]},
                 {"role": "model", "parts": ["Understood. I will act as the sales assistant in Hinglish."]}
             ]
             gemini_history.extend(parsed_history)
