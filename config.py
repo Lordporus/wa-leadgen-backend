@@ -47,6 +47,10 @@ DEFAULT_CLIENT_NAME = os.getenv("DEFAULT_CLIENT_NAME", "BuildWithPorus")
 # Frontend sends X-API-Key header on every dashboard request.
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 
+# ── F6: Admin onboarding endpoint auth ────────────────────────────────
+# Separate secret for POST /api/admin/clients. Fail closed if unset.
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+
 # ── Inbound lead creation guard ───────────────────────────────────────────
 # Numbers in this list will be silently dropped and never auto-created as
 # leads. Add spam callers or known bot numbers here as plain strings

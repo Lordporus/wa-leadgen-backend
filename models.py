@@ -41,6 +41,11 @@ class Client(Base):
     followup_template:  Mapped[str | None] = mapped_column(String(100), nullable=True)
     calendly_link:      Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # ── F6: onboarding / multi-tenant auth ────────────────────────────────
+    dashboard_api_key_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    is_active:              Mapped[bool]        = mapped_column(default=True)
+    admin_note:             Mapped[str | None]  = mapped_column(Text, nullable=True)
+
     leads: Mapped[list["Lead"]] = relationship(back_populates="client")
     pipeline_stages: Mapped[list["PipelineStage"]] = relationship(
         back_populates="client", order_by="PipelineStage.position"

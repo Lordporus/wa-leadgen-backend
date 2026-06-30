@@ -44,5 +44,8 @@ services:
       # ── Dashboard API ──
       - key: DASHBOARD_API_KEY
         sync: false       # secret key; frontend sends as X-API-Key header
+      # ── F6: Admin onboarding ──
+      - key: ADMIN_SECRET
+        sync: false       # secret for POST /api/admin/clients
       - key: FRONTEND_URL
         sync: false       # e.g. https://your-dashboard.vercel.app (for CORS)

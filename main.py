@@ -7,12 +7,14 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
     FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, DASHBOARD_API_KEY, BLOCKED_NUMBERS,
+    ADMIN_SECRET, MIGRATION_MODE,
 )
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
@@ -20,7 +22,7 @@ from calendly_client import CalendlyClient
 from store import get_store
 import tenant
 from database import SessionLocal
-from models import Client
+from models import Client, PipelineStage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,16 +30,6 @@ logger = logging.getLogger(__name__)
 whatsapp = WhatsAppClient()
 store = get_store()
 calendly = CalendlyClient()
-
-# ── Phase 8: load per-client config once at startup ───────────────────────
-# In airtable mode, load_client() returns None and get_gemini_for_client()
-# falls back to the hardcoded DEFAULT_SYSTEM_PROMPT — zero behaviour change.
-_active_client = tenant.load_client(CLIENT_ID)
-gemini = tenant.get_gemini_for_client(_active_client)
-_won_stages  = tenant.get_won_stage_names(CLIENT_ID)   # e.g. ['Booked']
-_lost_stages = tenant.get_lost_stage_names(CLIENT_ID)  # e.g. ['Lost']
-
-logger.info(f"Phase 8 tenant config: client_id={CLIENT_ID} won={_won_stages} lost={_lost_stages}")
 
 # ── Pydantic request bodies ───────────────────────────────────────────────
 
@@ -48,6 +40,14 @@ class SettingsUpdateBody(BaseModel):
     system_prompt: str | None = None
     calendly_link: str | None = None
     wa_phone_number_id: str | None = None
+
+class AdminCreateClientBody(BaseModel):
+    name: str
+    wa_phone_number_id: str
+    system_prompt: str | None = None
+    calendly_link: str | None = None
+    followup_template: str | None = None
+    admin_note: str | None = None
 
 # ── Deduplication: prevent re-processing when Meta retries webhooks ────────
 _processed_message_ids: set[str] = set()
@@ -121,51 +121,58 @@ app = FastAPI(title="WhatsApp Acquisition Backend", lifespan=lifespan)
 # ── Dashboard API key auth ─────────────────────────────────────────────────
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-def require_api_key(api_key: str = Security(_api_key_header)):
-    """Dependency: reject requests that don't carry the correct X-API-Key."""
-    if not DASHBOARD_API_KEY:
-        # Key not configured → open access (dev convenience; warn loudly).
-        logger.warning("DASHBOARD_API_KEY is not set — dashboard endpoints are unprotected!")
-        return
-    if api_key != DASHBOARD_API_KEY:
+def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
+    """
+    Dependency: resolve client from API key, with grace-period fallback.
+    """
+    if not api_key:
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
-@app.get("/api/settings", dependencies=[Depends(require_api_key)])
-def get_settings():
+    # 1. Try to resolve via the new hashed per-client key
+    ctx = tenant.resolve_context_by_api_key(api_key)
+    if ctx:
+        return ctx.client
+
+    # 2. Grace-period fallback: check against legacy global key
+    if DASHBOARD_API_KEY and api_key == DASHBOARD_API_KEY:
+        fallback_client = tenant.load_client(1)
+        if fallback_client:
+            return fallback_client
+
+    # 3. Neither matched
+    raise HTTPException(status_code=403, detail="Invalid or missing API key")
+
+@app.get("/api/settings")
+def get_settings(client: Client = Depends(require_api_key)):
     if not SessionLocal:
         return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
     with SessionLocal() as s:
-        client = s.query(Client).filter(Client.id == CLIENT_ID).first()
-        if not client:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
             return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
         return {
-            "system_prompt": client.system_prompt or "",
-            "calendly_link": client.calendly_link or "",
-            "wa_phone_number_id": client.wa_phone_number_id or ""
+            "system_prompt": db_client.system_prompt or "",
+            "calendly_link": db_client.calendly_link or "",
+            "wa_phone_number_id": db_client.wa_phone_number_id or ""
         }
 
-@app.patch("/api/settings", dependencies=[Depends(require_api_key)])
-def update_settings(body: SettingsUpdateBody):
+@app.patch("/api/settings")
+def update_settings(body: SettingsUpdateBody, client: Client = Depends(require_api_key)):
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
     with SessionLocal() as s:
-        client = s.query(Client).filter(Client.id == CLIENT_ID).first()
-        if not client:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
             raise HTTPException(status_code=404, detail="Client not found")
         
         if body.system_prompt is not None:
-            client.system_prompt = body.system_prompt
+            db_client.system_prompt = body.system_prompt
         if body.calendly_link is not None:
-            client.calendly_link = body.calendly_link
+            db_client.calendly_link = body.calendly_link
         if body.wa_phone_number_id is not None:
-            client.wa_phone_number_id = body.wa_phone_number_id
+            db_client.wa_phone_number_id = body.wa_phone_number_id
         
         s.commit()
-    
-    # Hot-reload gemini with new prompt
-    global gemini
-    _active = tenant.load_client(CLIENT_ID)
-    gemini = tenant.get_gemini_for_client(_active)
     
     return {"success": True}
 
@@ -181,6 +188,101 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── F6: Admin onboarding endpoint ─────────────────────────────────────────
+_admin_secret_header = APIKeyHeader(name="X-Admin-Secret", auto_error=False)
+
+def require_admin_secret(secret: str = Security(_admin_secret_header)):
+    """Dependency: fail closed — rejects if ADMIN_SECRET is unset OR mismatched."""
+    if not ADMIN_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="ADMIN_SECRET is not configured on the server",
+        )
+    if not secret or not hmac.compare_digest(secret, ADMIN_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid or missing admin secret")
+
+
+@app.post("/api/admin/clients", dependencies=[Depends(require_admin_secret)])
+def admin_create_client(body: AdminCreateClientBody):
+    """
+    Onboard a new client.
+
+    Creates the client row, generates a dashboard API key (returned once),
+    and seeds default pipeline stages.
+    """
+    if not SessionLocal:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    with SessionLocal() as s:
+        # ── a. Check wa_phone_number_id uniqueness ────────────────────
+        existing = (
+            s.query(Client)
+            .filter(Client.wa_phone_number_id == body.wa_phone_number_id)
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"wa_phone_number_id '{body.wa_phone_number_id}' is already "
+                    f"assigned to client id={existing.id} ({existing.name!r})"
+                ),
+            )
+
+        # ── b. Generate raw API key ───────────────────────────────────
+        raw_api_key = secrets.token_hex(32)
+
+        # ── c. Compute hash for storage ───────────────────────────────
+        key_hash = hashlib.sha256(raw_api_key.encode("utf-8")).hexdigest()
+
+        # ── d. Insert client row ──────────────────────────────────────
+        new_client = Client(
+            name=body.name,
+            wa_phone_number_id=body.wa_phone_number_id,
+            system_prompt=body.system_prompt,
+            calendly_link=body.calendly_link,
+            followup_template=body.followup_template or "",
+            dashboard_api_key_hash=key_hash,
+            is_active=True,
+            admin_note=body.admin_note,
+        )
+        s.add(new_client)
+        s.flush()  # get the auto-generated id before seeding stages
+
+        # ── e. Seed default pipeline stages ───────────────────────────
+        default_stages = [
+            ("New Lead",  1, False, False),
+            ("Contacted", 2, False, False),
+            ("Qualified", 3, False, False),
+            ("Booked",    4, True,  False),
+            ("Lost",      5, False, True),
+        ]
+        for stage_name, position, is_won, is_lost in default_stages:
+            s.add(PipelineStage(
+                client_id=new_client.id,
+                name=stage_name,
+                position=position,
+                is_won=is_won,
+                is_lost=is_lost,
+            ))
+
+        s.commit()
+
+    logger.info(
+        f"F6: onboarded client id={new_client.id} name={body.name!r} "
+        f"wa_phone={body.wa_phone_number_id}"
+    )
+
+    # ── f. Return credentials (raw key shown only once) ───────────
+    return {
+        "client_id": new_client.id,
+        "name": new_client.name,
+        "dashboard_api_key": raw_api_key,
+        "wa_phone_number_id": new_client.wa_phone_number_id,
+        "pipeline_stages_seeded": len(default_stages),
+    }
+
 
 # ── Dashboard helper utilities ─────────────────────────────────────────────
 
@@ -522,6 +624,25 @@ async def receive_message(request: Request):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 
+                # ── F6: Webhook routing by phone_number_id ────────────────
+                phone_number_id = value.get("metadata", {}).get("phone_number_id")
+                ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
+                
+                if not ctx:
+                    if MIGRATION_MODE == "airtable" or not tenant.is_configured():
+                        # Fallback for client #1 during transition / airtable mode
+                        fallback_client = tenant.load_client(CLIENT_ID)
+                        req_gemini = tenant.get_gemini_for_client(fallback_client)
+                        req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
+                        req_lost_stages = tenant.get_lost_stage_names(CLIENT_ID)
+                    else:
+                        logger.warning(f"Unknown phone_number_id: {phone_number_id}")
+                        return {"status": "ignored"}
+                else:
+                    req_gemini = ctx.gemini
+                    req_won_stages = ctx.won_stages
+                    req_lost_stages = ctx.lost_stages
+
                 # Check for incoming messages
                 if "messages" in value:
                     for message in value["messages"]:
@@ -594,9 +715,9 @@ async def receive_message(request: Request):
                                 
                             # Phase 4: AI Routing & Scoring
                             last_message = lead.get("fields", {}).get("Last_Message", "")
-                            parsed_history = gemini.parse_conversation_history(last_message)
+                            parsed_history = req_gemini.parse_conversation_history(last_message)
                             
-                            ai_reply = gemini.generate_response_with_history(parsed_history, user_text)
+                            ai_reply = req_gemini.generate_response_with_history(parsed_history, user_text)
                             wamid = whatsapp.send_message(sender_phone, ai_reply)
                             store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid)
                             
@@ -604,12 +725,12 @@ async def receive_message(request: Request):
                             lead_after_reply = store.get_lead(sender_phone)
                             updated_last_message = lead_after_reply.get("fields", {}).get("Last_Message", "")
                             
-                            score = gemini.score_lead(updated_last_message)
+                            score = req_gemini.score_lead(updated_last_message)
                             store.update_lead_score(sender_phone, score)
 
                             # Phase 7: extract name/business from the live conversation (was previously dead code)
                             try:
-                                info = gemini.extract_lead_info(updated_last_message)
+                                info = req_gemini.extract_lead_info(updated_last_message)
                                 if info:
                                     store.update_lead_info(
                                         sender_phone,
@@ -619,7 +740,7 @@ async def receive_message(request: Request):
                             except Exception as e:
                                 logger.error(f"Lead info extraction failed: {e}")
                             
-                            if score in _won_stages:
+                            if score in req_won_stages:
                                 store.update_lead_status(sender_phone, "Qualified")
                                 if LORD_PHONE_NUMBER:
                                     # ── FIX 2: Defense-in-depth — never alert to a number that is also an Airtable lead ──
@@ -636,7 +757,7 @@ async def receive_message(request: Request):
                             elif score == "Cold":
                                 decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
                                 if any(word in user_text.lower() for word in decline_keywords):
-                                    lost_stage = _lost_stages[0] if _lost_stages else "Lost"
+                                    lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
                                     store.update_lead_status(sender_phone, lost_stage)
                                     logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
 
