@@ -71,6 +71,7 @@ class DatabaseClient:
             "Business_Name": lead.business_name,
             "Last_Message": lead.last_message,
             "Lead_Score": lead.lead_score,
+            "client_id": lead.client_id,
             "Created_At": lead.created_at.isoformat() if lead.created_at else None,
         }
 
@@ -142,6 +143,20 @@ class DatabaseClient:
         except SQLAlchemyError as e:
             logger.error(f"Postgres get_lead error: {e}")
             return None
+
+    def get_contacted_leads(self, client_id: int) -> list[dict]:
+        """Return leads with status 'Contacted' for a specific client."""
+        if not self.ok:
+            return []
+        try:
+            with self._session() as s:
+                rows = s.execute(
+                    select(Lead).where(Lead.client_id == client_id, Lead.status == "Contacted")
+                ).scalars().all()
+                return [self._record(r) for r in rows]
+        except SQLAlchemyError as e:
+            logger.error(f"Postgres get_contacted_leads error: {e}")
+            return []
 
     def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
         """Create a new lead record. No-op if the phone already exists."""

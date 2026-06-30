@@ -55,30 +55,50 @@ _processed_message_ids: set[str] = set()
 def follow_up_job():
     """Hourly job: nudge leads stuck in 'Contacted' for >48h."""
     logger.info("Running hourly follow-up job...")
-    records = store._search("{Status}='Contacted'")
+    clients = tenant.get_all_active_clients()
+    if not clients:
+        # Fallback for when Postgres isn't configured (airtable mode)
+        logger.info("No active clients found (Postgres not configured), running in single-tenant mode.")
+        _process_followups_for_client(client_id=1, template_name=FOLLOWUP_TEMPLATE_NAME)
+        return
+
+    for ctx in clients:
+        template = (ctx.client.followup_template or FOLLOWUP_TEMPLATE_NAME or "").strip()
+        _process_followups_for_client(ctx.client.id, template)
+
+def _process_followups_for_client(client_id: int, template_name: str):
+    records = store.get_contacted_leads(client_id)
     now = datetime.now()
     for r in records:
         last_msg = r.get("fields", {}).get("Last_Message", "")
         if not last_msg:
             continue
         try:
-            last_line = last_msg.strip().split('\n')[-1]
-            time_str = last_line.split(']')[0].strip('[')
+            lines = last_msg.strip().split('\n')
+            time_str = None
+            for line in reversed(lines):
+                if line.startswith('['):
+                    time_str = line.split(']')[0].strip('[')
+                    break
+            
+            if not time_str:
+                continue
+                
             msg_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
             if now - msg_time > timedelta(hours=48):
                 phone = r.get("fields", {}).get("Phone number type")
-                if FOLLOWUP_TEMPLATE_NAME:
-                    logger.info(f"Follow-up eligible: {phone}. Sending template '{FOLLOWUP_TEMPLATE_NAME}'.")
-                    whatsapp.send_template(phone, FOLLOWUP_TEMPLATE_NAME)
+                if template_name:
+                    logger.info(f"Follow-up eligible: {phone} (Client {client_id}). Sending template '{template_name}'.")
+                    whatsapp.send_template(phone, template_name)
                     store.append_message(phone, direction="outbound",
-                                         message=f"[template: {FOLLOWUP_TEMPLATE_NAME}]", msg_type="template")
+                                         message=f"[template: {template_name}]", msg_type="template")
                 else:
                     logger.info(
-                        f"[DRY-RUN] Lead {phone} eligible for follow-up (Contacted > 48h). "
-                        f"Set FOLLOWUP_TEMPLATE_NAME to send for real."
+                        f"[DRY-RUN] Lead {phone} (Client {client_id}) eligible for follow-up (Contacted > 48h). "
+                        f"Set followup_template to send for real."
                     )
         except Exception as e:
-            logger.error(f"Error parsing timestamp for follow-up: {e}")
+            logger.error(f"Error parsing timestamp for follow-up (Client {client_id}): {e}")
 
 def calendly_sync_job():
     logger.info("Running Calendly sync job...")
@@ -99,8 +119,18 @@ def calendly_sync_job():
             if current_status not in ("Booked", "Lost"):
                 store.update_lead_status(phone, "Booked")
                 store.append_message(phone, "system", f"Calendly Booking Confirmed for {booking.get('start_time')}", "system")
-                if LORD_PHONE_NUMBER:
-                    whatsapp.send_message(LORD_PHONE_NUMBER, f"📅 BOOKED: {booking.get('name')} booked a call for {booking.get('start_time')}")
+                
+                admin_phone = LORD_PHONE_NUMBER
+                if tenant.is_configured():
+                    client_id = lead.get("fields", {}).get("client_id", 1)
+                    client_row = tenant.load_client(client_id)
+                    if client_row and client_row.admin_phone:
+                        admin_phone = client_row.admin_phone
+                        
+                if admin_phone:
+                    whatsapp.send_message(admin_phone, f"📅 BOOKED: {booking.get('name')} booked a call for {booking.get('start_time')}")
+                else:
+                    logger.warning(f"Booking matched, but neither admin_phone nor LORD_PHONE_NUMBER is configured. Alert suppressed for lead {phone}.")
             else:
                 logger.info(f"Matched booking for {phone} but lead status is {current_status}, skipping update.")
         else:

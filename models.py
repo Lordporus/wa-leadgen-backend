@@ -46,6 +46,14 @@ class Client(Base):
     is_active:              Mapped[bool]        = mapped_column(default=True)
     admin_note:             Mapped[str | None]  = mapped_column(Text, nullable=True)
 
+    # ── F6b: multi-tenant scheduler jobs ──────────────────────────────────
+    admin_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # TODO: Before actively using this field for per-client API calls,
+    # it must be encrypted at rest (e.g. via Supabase Vault or
+    # application-level encryption). Do not store or use real per-client
+    # tokens in plaintext in production.
+    calendly_api_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     leads: Mapped[list["Lead"]] = relationship(back_populates="client")
     pipeline_stages: Mapped[list["PipelineStage"]] = relationship(
         back_populates="client", order_by="PipelineStage.position"

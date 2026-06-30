@@ -116,6 +116,16 @@ class AirtableClient:
         """Return all records from the leads table."""
         return self._search("") if self.ok else []
 
+    def get_contacted_leads(self, client_id: int) -> list[dict]:
+        """
+        Return contacted leads. Airtable only supports client_id=1.
+        Returns empty list for any other client.
+        """
+        if client_id != 1:
+            return []
+        return self._search("{Status}='Contacted'")
+
+
     def get_lead_by_id(self, record_id: str) -> dict | None:
         """Return a single record by its Airtable record ID."""
         if not self.ok:

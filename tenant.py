@@ -243,3 +243,31 @@ def resolve_context_by_api_key(raw_api_key: str) -> ClientContext | None:
         logger.error(f"Failed to resolve client by API key hash: {e}")
         return None
 
+
+def get_all_active_clients() -> list[ClientContext]:
+    """
+    Fetch all active clients from Postgres and return their contexts.
+    Returns an empty list if Postgres is not configured.
+    """
+    if not is_configured():
+        logger.warning("Postgres not configured — cannot fetch active clients.")
+        return []
+
+    try:
+        with SessionLocal() as s:
+            clients = s.execute(
+                select(Client).where(Client.is_active.is_(True))
+            ).scalars().all()
+
+            contexts = []
+            for client in clients:
+                # Eagerly load relationships while session is open
+                _ = client.pipeline_stages  # noqa — touch to load
+                contexts.append(_build_context(client))
+                
+            return contexts
+
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to fetch active clients: {e}")
+        return []
+
