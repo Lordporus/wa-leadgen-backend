@@ -22,7 +22,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from airtable_client import AirtableClient
-from database import SessionLocal, is_configured
+import database
 from models import Lead, Message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -73,7 +73,10 @@ def fetch_all_airtable_leads(airtable: AirtableClient) -> list[dict]:
 
 
 def backfill():
-    if not is_configured():
+    from config import DATABASE_URL
+    from database import init_engine
+    init_engine(DATABASE_URL)
+    if not database.is_configured():
         logger.error("DATABASE_URL not configured. Aborting backfill.")
         return
 
@@ -90,7 +93,7 @@ def backfill():
     msg_inserted = 0
     msg_unparsed = 0
 
-    with SessionLocal() as s:
+    with database.SessionLocal() as s:
         for r in records:
             f = r.get("fields", {})
             phone = f.get("Phone number type")
@@ -142,7 +145,7 @@ def backfill():
         s.commit()
 
     # ── reconciliation report ──────────────────────────────────────────────
-    with SessionLocal() as s:
+    with database.SessionLocal() as s:
         pg_lead_count = s.execute(select(Lead)).scalars().all()
         pg_msg_count = s.execute(select(Message)).scalars().all()
 
