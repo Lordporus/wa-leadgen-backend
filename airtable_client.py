@@ -153,9 +153,13 @@ class AirtableClient:
         log_entry = f"[{timestamp}] {direction.upper()} ({msg_type}): {message}"
         
         current_log = record.get("fields", {}).get("Last_Message", "")
-        new_log = f"{current_log}\n{log_entry}".strip()
-        
+        new_log = f"{current_log}\n{log_entry}" if current_log else log_entry
         self._update(record["id"], {"Last_Message": new_log})
+
+    def update_message_status(self, wa_message_id: str, status: str) -> None:
+        """No-op for Airtable. Messages are stored as a flat text blob,
+        so per-message status isn't tracked here."""
+        logger.debug(f"AirtableClient ignoring status update {status} for {wa_message_id}")
 
     def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:
         """Update Name and/or Business_Name fields if values are provided."""
