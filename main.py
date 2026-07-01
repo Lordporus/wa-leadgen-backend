@@ -637,6 +637,80 @@ def verify_webhook(request: Request):
     
     raise HTTPException(status_code=400, detail="Bad Request")
 
+def _process_analytics_and_extraction_bg(
+    sender_phone: str,
+    updated_last_message: str,
+    user_text: str,
+    lead_name: str,
+    system_prompt: str | None,
+    req_won_stages: list,
+    req_lost_stages: list,
+    lord_phone: str | None
+):
+    """
+    Background worker that runs analytics (scoring, extraction) and CRM updates
+    outside the critical HTTP webhook path.
+    """
+    from store import get_store
+    from gemini_client import GeminiClient
+    from whatsapp_client import WhatsAppClient
+    
+    # Instantiate fresh clients per constraint #1 and #2
+    store = get_store()
+    req_gemini = GeminiClient(system_prompt=system_prompt)
+    whatsapp = WhatsAppClient()
+    
+    score = None
+    
+    # 1. Lead Scoring (Independent Try/Except)
+    try:
+        score = req_gemini.score_lead(updated_last_message)
+        store.update_lead_score(sender_phone, score)
+    except Exception as e:
+        logger.error(f"Lead scoring failed in background: {e}")
+        
+    # 2. Information Extraction (Independent Try/Except)
+    try:
+        info = req_gemini.extract_lead_info(updated_last_message)
+        if info:
+            store.update_lead_info(
+                sender_phone,
+                name=info.get("Name"),
+                business_name=info.get("Business_Name"),
+            )
+    except Exception as e:
+        logger.error(f"Lead info extraction failed in background: {e}")
+        
+    # 3. Status Updates (Independent Try/Except)
+    try:
+        if score in req_won_stages:
+            store.update_lead_status(sender_phone, "Qualified")
+        elif score == "Cold":
+            decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
+            if any(word in user_text.lower() for word in decline_keywords):
+                lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
+                store.update_lead_status(sender_phone, lost_stage)
+                logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
+    except Exception as e:
+        logger.error(f"Status update failed in background: {e}")
+        
+    # 4. Lord Notification (Executed last, constraint #4)
+    try:
+        if score in req_won_stages:
+            if lord_phone:
+                norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
+                if store.get_lead(norm_lord):
+                    logger.error(
+                        f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an "
+                        f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
+                    )
+                else:
+                    whatsapp.send_message(lord_phone, f"🔥 HOT LEAD ALERT: Check Airtable for {lead_name} ({sender_phone})")
+            else:
+                logger.info(f"🔥 HOT LEAD: {lead_name} {sender_phone}")
+    except Exception as e:
+        logger.error(f"Lord notification failed in background: {e}")
+
 @app.post("/webhook")
 async def receive_message(request: Request, bg_tasks: BackgroundTasks):
     """
@@ -755,41 +829,20 @@ async def receive_message(request: Request, bg_tasks: BackgroundTasks):
                             # Manually append the outbound message to memory for scoring
                             updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
                             
-                            score = req_gemini.score_lead(updated_last_message)
-                            store.update_lead_score(sender_phone, score)
-
-                            # Phase 7: extract name/business from the live conversation (was previously dead code)
-                            try:
-                                info = req_gemini.extract_lead_info(updated_last_message)
-                                if info:
-                                    store.update_lead_info(
-                                        sender_phone,
-                                        name=info.get("Name"),
-                                        business_name=info.get("Business_Name"),
-                                    )
-                            except Exception as e:
-                                logger.error(f"Lead info extraction failed: {e}")
+                            # Submit remaining LLM processing + CRM + Alerts to Background Tasks
+                            lead_name = lead.get("fields", {}).get("Name", "Unknown") if isinstance(lead, dict) else lead.business_name
                             
-                            if score in req_won_stages:
-                                store.update_lead_status(sender_phone, "Qualified")
-                                if LORD_PHONE_NUMBER:
-                                    # ── FIX 2: Defense-in-depth — never alert to a number that is also an Airtable lead ──
-                                    norm_lord = LORD_PHONE_NUMBER.replace('+', '').replace(' ', '').replace('-', '')
-                                    if store.get_lead(norm_lord):
-                                        logger.error(
-                                            f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({LORD_PHONE_NUMBER}) matches an "
-                                            f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
-                                        )
-                                    else:
-                                        whatsapp.send_message(LORD_PHONE_NUMBER, f"🔥 HOT LEAD ALERT: Check Airtable for {lead.get('fields', {}).get('Name', 'Unknown')} ({sender_phone})")
-                                else:
-                                    logger.info(f"🔥 HOT LEAD: {lead.get('fields', {}).get('Name', 'Unknown')} {sender_phone}")
-                            elif score == "Cold":
-                                decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
-                                if any(word in user_text.lower() for word in decline_keywords):
-                                    lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                                    store.update_lead_status(sender_phone, lost_stage)
-                                    logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
+                            bg_tasks.add_task(
+                                _process_analytics_and_extraction_bg,
+                                sender_phone,
+                                updated_last_message,
+                                user_text,
+                                lead_name,
+                                getattr(req_gemini, "system_prompt", None),
+                                req_won_stages,
+                                req_lost_stages,
+                                LORD_PHONE_NUMBER
+                            )
 
                             
                 # Check for message status updates (delivered/read)
