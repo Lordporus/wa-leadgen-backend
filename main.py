@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, Security, Depends
+from fastapi import FastAPI, Request, HTTPException, Security, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
@@ -19,7 +19,8 @@ from config import (
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
 from calendly_client import CalendlyClient
-from store import get_store
+from store import get_store, get_primary_store, get_secondary_store
+from webhook_store import WebhookStore
 import tenant
 from database import SessionLocal
 from sqlalchemy import text
@@ -637,7 +638,7 @@ def verify_webhook(request: Request):
     raise HTTPException(status_code=400, detail="Bad Request")
 
 @app.post("/webhook")
-async def receive_message(request: Request):
+async def receive_message(request: Request, bg_tasks: BackgroundTasks):
     """
     Receive incoming messages from WhatsApp users.
     """
@@ -649,6 +650,9 @@ async def receive_message(request: Request):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     body = await request.json()
+    
+    # Use decoupled background-capable store for webhook flow
+    store = WebhookStore(get_primary_store(), get_secondary_store(), bg_tasks)
     
     if body.get("object") == "whatsapp_business_account":
         for entry in body.get("entry", []):

@@ -179,6 +179,25 @@ class DatabaseClient:
             logger.error(f"Postgres add_lead error: {e}")
             return None
 
+    def update_lead_status_by_id(self, record_id: str, status: str) -> dict | None:
+        """Update lead status using its primary key."""
+        if not self.ok:
+            return None
+        try:
+            with self._session() as s:
+                row = s.execute(select(Lead).where(Lead.id == int(record_id))).scalar_one_or_none()
+                if not row:
+                    return None
+                row.status = status
+                row.updated_at = datetime.utcnow()
+                s.commit()
+                s.refresh(row)
+                logger.info(f"Postgres updated lead {record_id} to {status}")
+                return self._record(row)
+        except (SQLAlchemyError, ValueError) as e:
+            logger.error(f"Postgres update_lead_status_by_id error: {e}")
+            return None
+
     def update_lead_status(self, phone: str, status: str) -> dict | None:
         """Find lead by phone and update its Status field."""
         if not self.ok:

@@ -3,7 +3,10 @@ import logging
 import time
 import random
 from datetime import datetime
-from config import WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_BUSINESS_ACCOUNT_ID
+from config import (
+    WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, 
+    WHATSAPP_BUSINESS_ACCOUNT_ID, WHATSAPP_SIMULATE_HUMAN_DELAY
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +33,13 @@ class WhatsAppClient:
             logger.warning(f"WhatsApp daily send cap reached ({self.daily_cap}). Blocking outbound message.")
             return False
             
-        # Randomized delay between 3 and 10 seconds to mimic human sending
-        delay = random.uniform(3.0, 10.0)
-        logger.info(f"Applying random delay of {delay:.2f}s before sending WhatsApp message...")
-        time.sleep(delay)
+        if WHATSAPP_SIMULATE_HUMAN_DELAY:
+            # Randomized delay between 3 and 10 seconds to mimic human sending
+            delay = random.uniform(3.0, 10.0)
+            logger.info(f"Applying random delay of {delay:.2f}s before sending WhatsApp message...")
+            time.sleep(delay)
+        else:
+            logger.debug("Skipping artificial human delay for WhatsApp message sending.")
         
         self.sends_today += 1
         return True

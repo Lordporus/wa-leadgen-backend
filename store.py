@@ -119,6 +119,20 @@ class DualWriteStore:
 
 _store = None
 
+def get_primary_store():
+    mode = (MIGRATION_MODE or "airtable").lower()
+    if mode in ["postgres", "dual"]:
+        from db_client import DatabaseClient
+        return DatabaseClient()
+    from airtable_client import AirtableClient
+    return AirtableClient()
+
+def get_secondary_store():
+    mode = (MIGRATION_MODE or "airtable").lower()
+    if mode == "dual":
+        from airtable_client import AirtableClient
+        return AirtableClient()
+    return None
 
 def get_store():
     """
@@ -141,11 +155,14 @@ def get_store():
         from db_client import DatabaseClient
         if not DatabaseClient().ok:
             logger.error("MIGRATION_MODE=dual but Postgres not configured — falling back to Airtable.")
+            from airtable_client import AirtableClient
             _store = AirtableClient()
         else:
-            _store = DualWriteStore(AirtableClient(), DatabaseClient())
-            logger.info("Lead store = DualWrite (Airtable primary, Postgres shadow).")
+            from airtable_client import AirtableClient
+            _store = DualWriteStore(DatabaseClient(), AirtableClient())
+            logger.info("Lead store = DualWrite (Postgres primary, Airtable shadow).")
     else:  # "airtable" and any unknown value
+        from airtable_client import AirtableClient
         _store = AirtableClient()
         logger.info("Lead store = Airtable.")
 
