@@ -725,20 +725,13 @@ async def receive_message(request: Request):
                                 if not new_record:
                                     logger.error(f"Failed to create lead for {sender_phone}. Dropping message.")
                                     continue
-
-                                # Re-fetch so `lead` has the full Airtable record shape
-                                # (same structure that get_lead() returns)
-                                lead = store.get_lead(sender_phone)
-                                if not lead:
-                                    logger.error(f"Lead created but not retrievable for {sender_phone}. Dropping message.")
-                                    continue
+                                
+                                lead = new_record
                                 
                             # If matched: log message
                             store.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text")
                             
-                            # Refresh lead to get updated Last_Message
-                            lead = store.get_lead(sender_phone)
-                            current_status = lead.get("fields", {}).get("Status")
+                            current_status = lead.get("fields", {}).get("Status", "New Lead")
                             
                             # Update lead status to "Contacted" if currently "New Lead"
                             if current_status == "New Lead":
@@ -746,15 +739,17 @@ async def receive_message(request: Request):
                                 
                             # Phase 4: AI Routing & Scoring
                             last_message = lead.get("fields", {}).get("Last_Message", "")
-                            parsed_history = req_gemini.parse_conversation_history(last_message)
+                            # Manually append the inbound message to memory for Gemini to parse
+                            updated_last_message = last_message + f"\n[INBOUND - text]\n{user_text}\n"
+                            
+                            parsed_history = req_gemini.parse_conversation_history(updated_last_message)
                             
                             ai_reply = req_gemini.generate_response_with_history(parsed_history, user_text)
                             wamid = whatsapp.send_message(sender_phone, ai_reply)
                             store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid)
                             
-                            # Refresh lead to score the full conversation including the outbound message
-                            lead_after_reply = store.get_lead(sender_phone)
-                            updated_last_message = lead_after_reply.get("fields", {}).get("Last_Message", "")
+                            # Manually append the outbound message to memory for scoring
+                            updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
                             
                             score = req_gemini.score_lead(updated_last_message)
                             store.update_lead_score(sender_phone, score)
