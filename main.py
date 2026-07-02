@@ -247,7 +247,7 @@ def require_admin_secret(secret: str = Security(_admin_secret_header)):
             detail="ADMIN_SECRET is not configured on the server. Please check environment variables.",
         )
     if not secret or not hmac.compare_digest(secret, ADMIN_SECRET):
-        raise HTTPException(status_code=403, detail="Invalid or missing admin secret")
+        raise HTTPException(status_code=401, detail="Invalid or missing admin secret")
 
 
 @app.post("/api/admin/clients", dependencies=[Depends(require_admin_secret)])
