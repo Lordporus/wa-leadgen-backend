@@ -46,7 +46,7 @@ DEFAULT_CLIENT_NAME = os.getenv("DEFAULT_CLIENT_NAME", "BuildWithPorus")
 
 # ── Dashboard API auth ────────────────────────────────────────────────────
 # Frontend sends X-API-Key header on every dashboard request.
-DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
+
 
 # ── F6: Admin onboarding endpoint auth ────────────────────────────────
 # Separate secret for POST /api/admin/clients. Fail closed if unset.

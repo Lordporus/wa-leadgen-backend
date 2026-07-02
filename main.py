@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
-    FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, DASHBOARD_API_KEY, BLOCKED_NUMBERS,
+    FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, BLOCKED_NUMBERS,
     ADMIN_SECRET, MIGRATION_MODE,
 )
 from whatsapp_client import WhatsAppClient
@@ -165,13 +165,7 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
     if ctx:
         return ctx.client
 
-    # 2. Grace-period fallback: check against legacy global key
-    if DASHBOARD_API_KEY and api_key == DASHBOARD_API_KEY:
-        fallback_client = tenant.load_client(1)
-        if fallback_client:
-            return fallback_client
-
-    # 3. Neither matched
+    # 2. Neither matched
     raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 @app.get("/api/settings")
