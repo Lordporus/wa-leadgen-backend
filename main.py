@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, Security, Depends, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, Security, Depends, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
@@ -189,7 +189,7 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
 
 @app.get("/api/settings")
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_settings(request: Request, client: Client = Depends(require_api_key)):
+def get_settings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     if not SessionLocal:
         return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
     with SessionLocal() as s:
@@ -204,7 +204,7 @@ def get_settings(request: Request, client: Client = Depends(require_api_key)):
 
 @app.patch("/api/settings")
 @limiter.limit("120/minute", key_func=get_client_key)
-def update_settings(request: Request, body: SettingsUpdateBody, client: Client = Depends(require_api_key)):
+def update_settings(request: Request, response: Response, body: SettingsUpdateBody, client: Client = Depends(require_api_key)):
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
     with SessionLocal() as s:
@@ -252,7 +252,7 @@ def require_admin_secret(secret: str = Security(_admin_secret_header)):
 
 @app.post("/api/admin/clients", dependencies=[Depends(require_admin_secret)])
 @limiter.limit("10/minute", key_func=get_admin_key)
-def admin_create_client(request: Request, body: AdminCreateClientBody):
+def admin_create_client(request: Request, response: Response, body: AdminCreateClientBody):
     """
     Onboard a new client.
 
@@ -470,7 +470,7 @@ def _format_lead_row(record: dict) -> dict:
 
 @app.get("/api/stats/dashboard", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_dashboard_stats(request: Request):
+def get_dashboard_stats(request: Request, response: Response):
     """Aggregate lead counts and 7-day weekly activity from Airtable."""
     try:
         records = store.get_all_leads()
@@ -514,7 +514,7 @@ def get_dashboard_stats(request: Request):
 
 @app.get("/api/leads", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def list_leads(request: Request, stage: str | None = None):
+def list_leads(request: Request, response: Response, stage: str | None = None):
     """Return all leads, optionally filtered by pipeline stage."""
     try:
         if stage:
@@ -529,7 +529,7 @@ def list_leads(request: Request, stage: str | None = None):
 
 @app.get("/api/leads/{lead_id}", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_lead_detail(request: Request, lead_id: str):
+def get_lead_detail(request: Request, response: Response, lead_id: str):
     """Return a single lead with full conversation history."""
     try:
         record = store.get_lead_by_id(lead_id)
@@ -571,7 +571,7 @@ def get_lead_detail(request: Request, lead_id: str):
 
 @app.get("/api/leads/{lead_id}/messages", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_lead_messages(request: Request, lead_id: str):
+def get_lead_messages(request: Request, response: Response, lead_id: str):
     """Return all messages for a lead from the Postgres Message table."""
     try:
         record = store.get_lead_by_id(lead_id)
@@ -609,7 +609,7 @@ def get_lead_messages(request: Request, lead_id: str):
 
 @app.patch("/api/leads/{lead_id}/stage", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def update_lead_stage(request: Request, lead_id: str, body: StageUpdateBody):
+def update_lead_stage(request: Request, response: Response, lead_id: str, body: StageUpdateBody):
     """Update the pipeline stage for a lead by Airtable record ID."""
     valid_stages = {"New Lead", "Contacted", "Qualified", "Booked", "Lost"}
     if body.stage not in valid_stages:
@@ -638,12 +638,12 @@ def verify_signature(payload: bytes, signature_header: str) -> bool:
 
 @app.get("/")
 @limiter.limit("60/minute")
-def read_root(request: Request):
+def read_root(request: Request, response: Response):
     return {"status": "ok", "message": "WhatsApp Acquisition System is running."}
 
 @app.get("/webhook")
 @limiter.limit("10/minute")
-def verify_webhook(request: Request):
+def verify_webhook(request: Request, response: Response):
     """
     Meta Webhook Verification Route.
     """
@@ -736,7 +736,7 @@ def _process_analytics_and_extraction_bg(
 
 @app.post("/webhook")
 @limiter.limit("1000/minute")
-async def receive_message(request: Request, bg_tasks: BackgroundTasks):
+async def receive_message(request: Request, response: Response, bg_tasks: BackgroundTasks):
     """
     Receive incoming messages from WhatsApp users.
     """
@@ -883,7 +883,7 @@ async def receive_message(request: Request, bg_tasks: BackgroundTasks):
 
 @app.get("/api/analytics/funnel", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def analytics_funnel(request: Request, client: Client = Depends(require_api_key)):
+def analytics_funnel(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """
     Returns a snapshot count of leads by status for the authenticated client.
     """
@@ -900,7 +900,7 @@ def analytics_funnel(request: Request, client: Client = Depends(require_api_key)
 
 @app.get("/api/analytics/response-time", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def analytics_response_time(request: Request, client: Client = Depends(require_api_key)):
+def analytics_response_time(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """
     Pairs each INBOUND message with the next OUTBOUND message to calculate response times.
     Uses Postgres window functions to determine the exact gap.
@@ -977,7 +977,7 @@ def analytics_response_time(request: Request, client: Client = Depends(require_a
 
 @app.get("/api/analytics/bookings", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def analytics_bookings(request: Request, client: Client = Depends(require_api_key)):
+def analytics_bookings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """
     Counts bookings by looking at SYSTEM messages indicating a Calendly confirmation.
     Scoped to the last 30 days.
