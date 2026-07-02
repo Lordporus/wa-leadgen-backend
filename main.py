@@ -243,8 +243,8 @@ def require_admin_secret(secret: str = Security(_admin_secret_header)):
     """Dependency: fail closed — rejects if ADMIN_SECRET is unset OR mismatched."""
     if not ADMIN_SECRET:
         raise HTTPException(
-            status_code=500,
-            detail="ADMIN_SECRET is not configured on the server",
+            status_code=503,
+            detail="ADMIN_SECRET is not configured on the server. Please check environment variables.",
         )
     if not secret or not hmac.compare_digest(secret, ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Invalid or missing admin secret")
