@@ -30,10 +30,11 @@ class WebhookStore:
             self.bg.add_task(self._safe_bg, self.secondary.add_lead, name, phone, source)
         return result
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None):
-        self.primary.append_message(phone, direction, message, msg_type, wa_message_id)
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
+        result = self.primary.append_message(phone, direction, message, msg_type, wa_message_id)
         if self.secondary:
             self.bg.add_task(self._safe_bg, self.secondary.append_message, phone, direction, message, msg_type, wa_message_id)
+        return result
 
     def update_lead_status(self, phone: str, status: str):
         result = self.primary.update_lead_status(phone, status)

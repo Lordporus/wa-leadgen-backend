@@ -218,15 +218,17 @@ class DatabaseClient:
             logger.error(f"Postgres update_lead_status error: {e}")
             return None
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> None:
-        """Append a message row for this lead (normalised; replaces text-blob)."""
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
+        """Append a message row for this lead. Returns False on unique constraint violation (duplicate wamid)."""
         if not self.ok:
-            return
+            return True
+        
+        from sqlalchemy.exc import IntegrityError
         try:
             with self._session() as s:
                 row = s.execute(select(Lead).where(Lead.phone == phone)).scalar_one_or_none()
                 if not row:
-                    return
+                    return True
                 s.add(Message(
                     lead_id=row.id,
                     direction=direction.upper(),
@@ -236,8 +238,13 @@ class DatabaseClient:
                 ))
                 row.updated_at = datetime.utcnow()
                 s.commit()
+                return True
+        except IntegrityError:
+            # Caught unique constraint violation on wa_message_id
+            return False
         except SQLAlchemyError as e:
             logger.error(f"Postgres append_message error: {e}")
+            return True
 
     def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:
         """Update Name and/or Business_Name fields if values are provided."""

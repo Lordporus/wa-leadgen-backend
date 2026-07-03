@@ -55,8 +55,6 @@ class AdminCreateClientBody(BaseModel):
     followup_template: str | None = None
     admin_note: str | None = None
 
-# ── Deduplication: prevent re-processing when Meta retries webhooks ────────
-_processed_message_ids: set[str] = set()
 
 def follow_up_job():
     """Hourly job: nudge leads stuck in 'Contacted' for >48h."""
@@ -790,14 +788,8 @@ async def receive_message(request: Request, response: Response, bg_tasks: Backgr
                             logger.warning(f"Ignored: message from LORD_PHONE_NUMBER ({sender_phone}) — loop guard triggered.")
                             continue
 
-                        # ── Dedup guard: skip messages already processed ──
+                        # ── Dedup guard: persistent check happens at append_message below ──
                         msg_id = message.get("id", "")
-                        if msg_id in _processed_message_ids:
-                            logger.info(f"Duplicate message {msg_id} from {sender_phone}, skipping")
-                            continue
-                        if len(_processed_message_ids) > 1000:
-                            _processed_message_ids.clear()
-                        _processed_message_ids.add(msg_id)
 
                         if message_type == "text":
                             user_text = message["text"]["body"]
@@ -830,8 +822,13 @@ async def receive_message(request: Request, response: Response, bg_tasks: Backgr
                                 
                                 lead = new_record
                                 
-                            # If matched: log message
-                            store.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text")
+                            # ── Persistent Idempotency Check ──
+                            # Attempt to append the message with its wamid. 
+                            # If it fails due to a unique constraint violation, it's a duplicate retry.
+                            appended = store.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text", wa_message_id=msg_id)
+                            if not appended:
+                                logger.info(f"Duplicate webhook skipped | wamid: {msg_id} | phone: {sender_phone}")
+                                continue
                             
                             current_status = lead.get("fields", {}).get("Status", "New Lead")
                             

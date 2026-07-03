@@ -142,11 +142,11 @@ class AirtableClient:
             logger.error(f"Airtable get_by_id error: {e}")
             return None
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> None:
+    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
         """Append a message to the Last_Message long text field (used as MVP message log)."""
         records = self._search(f"{{Phone number type}}='{phone}'")
         if not records:
-            return
+            return True
             
         record = records[0]
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -155,6 +155,7 @@ class AirtableClient:
         current_log = record.get("fields", {}).get("Last_Message", "")
         new_log = f"{current_log}\n{log_entry}" if current_log else log_entry
         self._update(record["id"], {"Last_Message": new_log})
+        return True
 
     def update_message_status(self, wa_message_id: str, status: str) -> None:
         """No-op for Airtable. Messages are stored as a flat text blob,
