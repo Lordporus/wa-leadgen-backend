@@ -35,7 +35,7 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: MIGRATION_MODE
-        value: airtable   # airtable | dual | postgres
+        value: dual       # airtable | dual | postgres
       # ── Phase 8: Multi-tenant ──
       - key: CLIENT_ID
         value: 1          # override per Render service for each new client
