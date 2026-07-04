@@ -1009,3 +1009,29 @@ def analytics_bookings(request: Request, response: Response, client: Client = De
                 for row in daily_results
             ]
         }
+
+# Trigger reload
+
+@app.get('/api/debug')
+def debug_leads():
+    return {'store_type': str(type(store)), 'primary_type': str(type(store._primary)), 'ok': getattr(store._primary, 'ok', 'N/A'), 'len_leads': len(store.get_all_leads())}
+
+@app.get('/debug/runtime')
+def debug_runtime():
+    import os
+    import main as _main_mod
+    from dotenv import find_dotenv
+    from config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, MIGRATION_MODE
+    _primary = getattr(store, '_primary', store)
+    return {
+        "cwd":                  os.getcwd(),
+        "__file__":             _main_mod.__file__,
+        "find_dotenv":          find_dotenv(),
+        "AIRTABLE_API_KEY":     bool(AIRTABLE_API_KEY),
+        "AIRTABLE_BASE_ID":     AIRTABLE_BASE_ID,
+        "AIRTABLE_TABLE_NAME":  AIRTABLE_TABLE_NAME,
+        "MIGRATION_MODE":       MIGRATION_MODE,
+        "type_store":           str(type(store)),
+        "type_store_primary":   str(type(_primary)),
+        "store_primary_ok":     getattr(_primary, 'ok', 'N/A'),
+    }

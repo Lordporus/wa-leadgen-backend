@@ -160,8 +160,8 @@ def get_store():
             _store = AirtableClient()
         else:
             from airtable_client import AirtableClient
-            _store = DualWriteStore(DatabaseClient(), AirtableClient())
-            logger.info("Lead store = DualWrite (Postgres primary, Airtable shadow).")
+            _store = DualWriteStore(AirtableClient(), DatabaseClient())
+            logger.info("Lead store = DualWrite (Airtable primary, Postgres shadow).")
     else:  # "airtable" and any unknown value
         from airtable_client import AirtableClient
         _store = AirtableClient()
