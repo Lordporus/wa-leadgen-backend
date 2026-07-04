@@ -355,10 +355,12 @@ def admin_create_client(request: Request, response: Response, body: AdminCreateC
 DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 def _parse_created_at(raw: str) -> datetime | None:
-    """Try ISO 8601 and a few common date formats stored in Airtable."""
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip().replace("Z", "").split("+")[0]
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw[:len(fmt)], fmt)
+            return datetime.strptime(raw, fmt)
         except (ValueError, TypeError):
             continue
     return None
