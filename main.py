@@ -42,10 +42,17 @@ calendly = CalendlyClient()
 class StageUpdateBody(BaseModel):
     stage: str
 
+class PipelineStageUpdate(BaseModel):
+    id: int
+    name: str
+    is_won: bool
+    is_lost: bool
+
 class SettingsUpdateBody(BaseModel):
     system_prompt: str | None = None
     calendly_link: str | None = None
     wa_phone_number_id: str | None = None
+    pipeline_stages: list[PipelineStageUpdate] | None = None
 
 class AdminCreateClientBody(BaseModel):
     name: str
@@ -189,15 +196,19 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_settings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     if not SessionLocal:
-        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
+        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": []}
     with SessionLocal() as s:
         db_client = s.query(Client).filter(Client.id == client.id).first()
         if not db_client:
-            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": ""}
+            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": []}
+        
+        stage_list = [{"id": st.id, "name": st.name, "position": st.position, "is_won": st.is_won, "is_lost": st.is_lost} for st in db_client.pipeline_stages]
+        
         return {
             "system_prompt": db_client.system_prompt or "",
             "calendly_link": db_client.calendly_link or "",
-            "wa_phone_number_id": db_client.wa_phone_number_id or ""
+            "wa_phone_number_id": db_client.wa_phone_number_id or "",
+            "pipeline_stages": stage_list
         }
 
 @app.patch("/api/settings")
@@ -216,6 +227,15 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
             db_client.calendly_link = body.calendly_link
         if body.wa_phone_number_id is not None:
             db_client.wa_phone_number_id = body.wa_phone_number_id
+            
+        if body.pipeline_stages is not None:
+            stage_map = {st.id: st for st in db_client.pipeline_stages}
+            for stage_update in body.pipeline_stages:
+                if stage_update.id in stage_map:
+                    stage = stage_map[stage_update.id]
+                    stage.name = stage_update.name
+                    stage.is_won = stage_update.is_won
+                    stage.is_lost = stage_update.is_lost
         
         s.commit()
     
