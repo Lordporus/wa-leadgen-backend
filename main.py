@@ -1010,6 +1010,29 @@ def analytics_bookings(request: Request, response: Response, client: Client = De
             ]
         }
 
+@app.get("/api/analytics/sources", dependencies=[Depends(require_api_key)])
+@limiter.limit("120/minute", key_func=get_client_key)
+def analytics_sources(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """
+    Returns lead counts grouped by source.
+    """
+    with SessionLocal() as s:
+        query = text("""
+            SELECT source, COUNT(id) as count
+            FROM leads
+            WHERE client_id = :client_id
+              AND source IS NOT NULL
+              AND source != ''
+            GROUP BY source
+            ORDER BY count DESC
+        """)
+        results = s.execute(query, {"client_id": client.id}).fetchall()
+        
+        return [
+            {"source": str(row.source), "count": row.count}
+            for row in results
+        ]
+
 # Trigger reload
 
 @app.get('/api/debug')
