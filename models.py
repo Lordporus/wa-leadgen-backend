@@ -46,6 +46,11 @@ class Client(Base):
     is_active:              Mapped[bool]        = mapped_column(default=True)
     admin_note:             Mapped[str | None]  = mapped_column(Text, nullable=True)
 
+    # ── White-label branding ────────────────────────────────────────────────
+    brand_color:          Mapped[str | None] = mapped_column(String(20),  default="#10B981", nullable=True)
+    logo_url:             Mapped[str | None] = mapped_column(String(500), nullable=True)
+    company_display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # ── F6b: multi-tenant scheduler jobs ──────────────────────────────────
     admin_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # TODO: Before actively using this field for per-client API calls,

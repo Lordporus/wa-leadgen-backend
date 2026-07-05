@@ -53,6 +53,9 @@ class SettingsUpdateBody(BaseModel):
     calendly_link: str | None = None
     wa_phone_number_id: str | None = None
     pipeline_stages: list[PipelineStageUpdate] | None = None
+    brand_color: str | None = None
+    logo_url: str | None = None
+    company_display_name: str | None = None
 
 class AdminCreateClientBody(BaseModel):
     name: str
@@ -196,19 +199,22 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_settings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     if not SessionLocal:
-        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": []}
+        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#10B981", "logo_url": "", "company_display_name": "Leadgen CRM"}
     with SessionLocal() as s:
         db_client = s.query(Client).filter(Client.id == client.id).first()
         if not db_client:
-            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": []}
-        
+            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#10B981", "logo_url": "", "company_display_name": "Leadgen CRM"}
+
         stage_list = [{"id": st.id, "name": st.name, "position": st.position, "is_won": st.is_won, "is_lost": st.is_lost} for st in db_client.pipeline_stages]
-        
+
         return {
             "system_prompt": db_client.system_prompt or "",
             "calendly_link": db_client.calendly_link or "",
             "wa_phone_number_id": db_client.wa_phone_number_id or "",
-            "pipeline_stages": stage_list
+            "pipeline_stages": stage_list,
+            "brand_color": db_client.brand_color or "#10B981",
+            "logo_url": db_client.logo_url or "",
+            "company_display_name": db_client.company_display_name or db_client.name or "Leadgen CRM",
         }
 
 @app.patch("/api/settings")
@@ -227,6 +233,12 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
             db_client.calendly_link = body.calendly_link
         if body.wa_phone_number_id is not None:
             db_client.wa_phone_number_id = body.wa_phone_number_id
+        if body.brand_color is not None:
+            db_client.brand_color = body.brand_color
+        if body.logo_url is not None:
+            db_client.logo_url = body.logo_url
+        if body.company_display_name is not None:
+            db_client.company_display_name = body.company_display_name
             
         if body.pipeline_stages is not None:
             stage_map = {st.id: st for st in db_client.pipeline_stages}
