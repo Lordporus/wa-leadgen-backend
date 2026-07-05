@@ -25,8 +25,8 @@ class AirtableClient:
 
     # ── internal helpers ──────────────────────────────────────────────────
 
-    def _search(self, formula: str) -> list:
-        """Return list of matching Airtable records."""
+    def _search(self, formula: str, client_id=None) -> list:
+        """Return list of matching Airtable records. client_id ignored — single tenant."""
         if not self.ok: return []
         try:
             resp = requests.get(
@@ -112,8 +112,8 @@ class AirtableClient:
             logger.info(f"Status updated → {status}: record {record_id}")
         return updated
 
-    def get_all_leads(self) -> list:
-        """Return all records from the leads table."""
+    def get_all_leads(self, client_id=None) -> list:
+        """Return all records from the leads table. client_id ignored — single tenant."""
         return self._search("") if self.ok else []
 
     def get_contacted_leads(self, client_id: int) -> list[dict]:

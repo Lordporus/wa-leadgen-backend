@@ -48,8 +48,8 @@ class DualWriteStore:
 
     # ── reads (primary only) ──────────────────────────────────────────────
 
-    def _search(self, formula: str) -> list:
-        return self._primary._search(formula)
+    def _search(self, formula: str, client_id=None) -> list:
+        return self._primary._search(formula, client_id=client_id)
 
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         return self._primary.get_contacted_leads(client_id)
@@ -57,8 +57,8 @@ class DualWriteStore:
     def get_lead(self, phone: str) -> dict | None:
         return self._primary.get_lead(phone)
 
-    def get_all_leads(self) -> list:
-        return self._primary.get_all_leads()
+    def get_all_leads(self, client_id=None) -> list:
+        return self._primary.get_all_leads(client_id=client_id)
 
     def get_lead_by_id(self, record_id: str) -> dict | None:
         return self._primary.get_lead_by_id(record_id)

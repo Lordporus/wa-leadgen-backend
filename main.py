@@ -488,12 +488,12 @@ def _format_lead_row(record: dict) -> dict:
     }
 # ── Dashboard endpoints ───────────────────────────────────────────────────
 
-@app.get("/api/stats/dashboard", dependencies=[Depends(require_api_key)])
+@app.get("/api/stats/dashboard")
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_dashboard_stats(request: Request, response: Response):
+def get_dashboard_stats(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """Aggregate lead counts and 7-day weekly activity from Airtable."""
     try:
-        records = store.get_all_leads()
+        records = store.get_all_leads(client_id=client.id)
     except Exception:
         raise HTTPException(status_code=503, detail="data source unavailable")
 
@@ -532,24 +532,24 @@ def get_dashboard_stats(request: Request, response: Response):
     }
 
 
-@app.get("/api/leads", dependencies=[Depends(require_api_key)])
+@app.get("/api/leads")
 @limiter.limit("120/minute", key_func=get_client_key)
-def list_leads(request: Request, response: Response, stage: str | None = None):
+def list_leads(request: Request, response: Response, client: Client = Depends(require_api_key), stage: str | None = None):
     """Return all leads, optionally filtered by pipeline stage."""
     try:
         if stage:
-            records = store._search(f"{{Status}}='{stage}'")
+            records = store._search(f"{{Status}}='{stage}'", client_id=client.id)
         else:
-            records = store.get_all_leads()
+            records = store.get_all_leads(client_id=client.id)
     except Exception:
         raise HTTPException(status_code=503, detail="data source unavailable")
 
     return [_format_lead_row(r) for r in records]
 
 
-@app.get("/api/leads/{lead_id}", dependencies=[Depends(require_api_key)])
+@app.get("/api/leads/{lead_id}")
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_lead_detail(request: Request, response: Response, lead_id: str):
+def get_lead_detail(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Return a single lead with full conversation history."""
     try:
         record = store.get_lead_by_id(lead_id)

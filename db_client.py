@@ -112,7 +112,7 @@ class DatabaseClient:
 
     # ── public API (mirrors AirtableClient) ───────────────────────────────
 
-    def _search(self, formula: str) -> list:
+    def _search(self, formula: str, client_id=None) -> list:
         """
         Airtable-compat filter. We only support the subset actually used in
         this codebase: `{Status}='<value>'`. Anything else → returns all leads
@@ -123,13 +123,31 @@ class DatabaseClient:
         status_val = _parse_status_formula(formula)
         try:
             with self._session() as s:
+                q = select(Lead)
                 if status_val is not None:
-                    rows = s.execute(select(Lead).where(Lead.status == status_val)).scalars().all()
-                else:
-                    rows = s.execute(select(Lead)).scalars().all()
+                    q = q.where(Lead.status == status_val)
+                if client_id is not None:
+                    q = q.where(Lead.client_id == client_id)
+                rows = s.execute(q).scalars().all()
                 return [self._record(r) for r in rows]
         except SQLAlchemyError as e:
             logger.error(f"Postgres search error: {e}")
+            return []
+
+    def get_all_leads(self, client_id=None) -> list:
+        """Return all leads, optionally scoped by client_id."""
+        if not self.ok:
+            return []
+        try:
+            with self._session() as s:
+                q = select(Lead)
+                if client_id is not None:
+                    q = q.where(Lead.client_id == client_id)
+                q = q.order_by(Lead.created_at.desc())
+                rows = s.execute(q).scalars().all()
+                return [self._record(r) for r in rows]
+        except SQLAlchemyError as e:
+            logger.error(f"Postgres get_all_leads error: {e}")
             return []
 
     def get_lead(self, phone: str) -> dict | None:
