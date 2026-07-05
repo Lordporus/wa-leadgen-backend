@@ -47,7 +47,7 @@ class Client(Base):
     admin_note:             Mapped[str | None]  = mapped_column(Text, nullable=True)
 
     # ── White-label branding ────────────────────────────────────────────────
-    brand_color:          Mapped[str | None] = mapped_column(String(20),  default="#10B981", nullable=True)
+    brand_color:          Mapped[str | None] = mapped_column(String(20),  default="#C8A96E", nullable=True)
     logo_url:             Mapped[str | None] = mapped_column(String(500), nullable=True)
     company_display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 

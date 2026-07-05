@@ -199,11 +199,11 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_settings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     if not SessionLocal:
-        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#10B981", "logo_url": "", "company_display_name": "Leadgen CRM"}
+        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM"}
     with SessionLocal() as s:
         db_client = s.query(Client).filter(Client.id == client.id).first()
         if not db_client:
-            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#10B981", "logo_url": "", "company_display_name": "Leadgen CRM"}
+            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM"}
 
         stage_list = [{"id": st.id, "name": st.name, "position": st.position, "is_won": st.is_won, "is_lost": st.is_lost} for st in db_client.pipeline_stages]
 
