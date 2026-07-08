@@ -49,3 +49,17 @@ services:
         sync: false       # secret for POST /api/admin/clients
       - key: FRONTEND_URL
         sync: false       # e.g. https://your-dashboard.vercel.app (for CORS)
+      # ── Sprint 6: JWT auth ──
+      - key: JWT_SECRET
+        sync: false       # shared signing secret between backend and frontend
+      # ── Sprint 6: Razorpay billing ──
+      - key: RAZORPAY_KEY_ID
+        sync: false       # Razorpay API key (test: rzp_test_xxx / live: rzp_live_xxx)
+      - key: RAZORPAY_KEY_SECRET
+        sync: false       # Razorpay API secret — never log or expose
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false       # Razorpay webhook signing secret
+      - key: RAZORPAY_PLAN_ID_BASE
+        sync: false       # plan_xxx for Base tier (run setup_plans() once to create)
+      - key: RAZORPAY_PLAN_ID_AGENCY
+        sync: false       # plan_xxx for Agency tier (run setup_plans() once to create)

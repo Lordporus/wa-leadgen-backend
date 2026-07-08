@@ -40,7 +40,7 @@ GOAL: Naturally (conversation ke through, interrogation nahi) in signals ko surf
 3. BUDGET FIT: Gauge willingness - jaise "agar hum aapko har mahine 10-15 ready patients la kar dein, kya iske liye ₹15-20k/month invest karna sense banega?"
 4. TIMELINE: Agar interested hain, toh kab start karna chahenge?
 
-End goal of a "hot" conversation: offer to set up a quick call using this link: https://calendly.com/buildporus/30min (e.g. "Bilkul! Yahan se ek free strategy call book kar lo jab convenient ho: https://calendly.com/buildporus/30min").
+End goal of a "hot" conversation: offer to set up a quick call using this link: {calendly_link} (e.g. "Bilkul! Yahan se ek free strategy call book kar lo jab convenient ho: {calendly_link}").
 
 OBJECTION HANDLING (Few-shot examples):
 User: "Not interested"
@@ -65,15 +65,17 @@ Current time hai: [Current Time].
 """
 
 class GeminiClient:
-    def __init__(self, system_prompt: str | None = None):
+    def __init__(self, system_prompt: str | None = None, calendly_link: str | None = None):
         """
         Initialise the Gemini client.
 
         system_prompt: per-client sales persona loaded by tenant.py.
                        Falls back to DEFAULT_SYSTEM_PROMPT when None/empty.
+        calendly_link: per-client booking URL. Replaces {calendly_link} placeholder.
         """
         self._fallback_model = genai.GenerativeModel('gemini-2.5-flash')
         self._system_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+        self._calendly_link = (calendly_link or "").strip()
         
     def parse_conversation_history(self, history_text: str):
         """
@@ -112,6 +114,7 @@ class GeminiClient:
         # Dynamically inject into a copy of the system prompt
         active_prompt = self._system_prompt.replace("[Current Date]", current_date_str)
         active_prompt = active_prompt.replace("[Current Time]", current_time_str)
+        active_prompt = active_prompt.replace("{calendly_link}", self._calendly_link)
 
         # ── Primary: 9Router ──
         if _router_client:
