@@ -11,6 +11,8 @@ venv.bak/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# AI assistant / tooling dirs — not for source control
 .claude/
 .gemini/
 .codegraph/
@@ -18,7 +20,12 @@ __pycache__/
 AGENTS.md
 GEMINI.md
 opencode.jsonc
+
+# One-off scripts — local dev only, never commit
 _find_region.py
 test_*.py
+run_*.py
+
+# Build artefacts / local-only docs
 *.html
 v2_upgrade.md

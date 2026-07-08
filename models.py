@@ -16,9 +16,10 @@ works against Postgres data with zero changes:
 
 from datetime import datetime
 from sqlalchemy import (
-    Integer, String, Text, DateTime, ForeignKey, Index
+    Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 from database import Base
 
 
@@ -59,6 +60,12 @@ class Client(Base):
     # tokens in plaintext in production.
     calendly_api_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # ── Billing / Razorpay ───────────────────────────────────────────────
+    razorpay_customer_id:     Mapped[str | None] = mapped_column(String(100), nullable=True)
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    subscription_status:      Mapped[str | None] = mapped_column(String(30), default="inactive", nullable=True)
+    plan_tier:                Mapped[str | None] = mapped_column(String(20), default="base", nullable=True)
+
     leads: Mapped[list["Lead"]] = relationship(back_populates="client")
     pipeline_stages: Mapped[list["PipelineStage"]] = relationship(
         back_populates="client", order_by="PipelineStage.position"
@@ -83,6 +90,7 @@ class Lead(Base):
     status: Mapped[str] = mapped_column(String(50), default="New Lead", index=True)
     business_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lead_score: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    is_human_takeover: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     client_id: Mapped[int] = mapped_column(
         ForeignKey("clients.id"), default=1, nullable=False
     )
@@ -170,3 +178,56 @@ class PipelineStage(Base):
 
     def __repr__(self) -> str:
         return f"<PipelineStage id={self.id} name={self.name!r} pos={self.position}>"
+
+
+class PromptTemplate(Base):
+    """System-wide prompt template presets that any client can load."""
+    __tablename__ = "prompt_templates"
+
+    id:           Mapped[int]      = mapped_column(Integer, primary_key=True)
+    slug:         Mapped[str]      = mapped_column(String(100), unique=True, nullable=False)
+    niche:        Mapped[str]      = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str]      = mapped_column(String(255), nullable=False)
+    body:         Mapped[str]      = mapped_column(Text, nullable=False)
+    is_default:   Mapped[bool]     = mapped_column(Boolean, default=False)
+    created_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<PromptTemplate id={self.id} slug={self.slug!r}>"
+
+
+class Document(Base):
+    """
+    RAG knowledge base chunk. Each row is one chunk of an uploaded document,
+    with its 768-dim embedding from gemini-embedding-001.
+    """
+    __tablename__ = "documents"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True)
+    client_id:   Mapped[int]      = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    filename:    Mapped[str]      = mapped_column(String(500), nullable=False)
+    chunk_index: Mapped[int]      = mapped_column(Integer, nullable=False)
+    content:     Mapped[str]      = mapped_column(Text, nullable=False)
+    embedding                     = mapped_column(Vector(768), nullable=True)
+    created_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    client: Mapped["Client"] = relationship()
+
+    def __repr__(self) -> str:
+        return f"<Document id={self.id} file={self.filename!r} chunk={self.chunk_index}>"
+
+
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id:            Mapped[int]      = mapped_column(Integer, primary_key=True)
+    client_id:     Mapped[int]      = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    event_type:    Mapped[str]      = mapped_column(String(50), nullable=False)
+    tokens_used:   Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    cost_estimate: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    created_at:    Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    client: Mapped["Client"] = relationship()
+
+    def __repr__(self) -> str:
+        return f"<UsageEvent id={self.id} type={self.event_type!r} tokens={self.tokens_used}>"

@@ -11,3 +11,9 @@ sqlalchemy>=2.0,<2.1
 psycopg2-binary>=2.9
 alembic>=1.13
 slowapi==0.1.9
+PyJWT>=2.8,<3.0
+redis>=5.0,<6.0
+rq>=1.16,<2.0
+pgvector>=0.3,<1.0
+pypdf>=4.0,<5.0
+razorpay>=1.4,<3.0
