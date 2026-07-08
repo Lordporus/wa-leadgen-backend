@@ -15,7 +15,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ── 9Router (OpenAI-compatible LLM gateway) ──────────────────────────────
 NINEROUTER_API_KEY = os.getenv("NINEROUTER_API_KEY", "")
-NINEROUTER_BASE_URL = os.getenv("NINEROUTER_BASE_URL", "http://13.234.20.175:20128/v1")
+NINEROUTER_BASE_URL = os.getenv("NINEROUTER_BASE_URL", "https://13.234.20.175:20128/v1")
 NINEROUTER_MODEL = os.getenv("NINEROUTER_MODEL", "wa-leadgen-backend-fallback-chain")
 
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
@@ -47,13 +47,29 @@ DEFAULT_CLIENT_NAME = os.getenv("DEFAULT_CLIENT_NAME", "BuildWithPorus")
 # ── Dashboard API auth ────────────────────────────────────────────────────
 # Frontend sends X-API-Key header on every dashboard request.
 
+# ── JWT Authentication ───────────────────────────────────────────────────
+# Shared signing secret between backend and Next.js frontend (jose).
+# Must match the frontend JWT_SECRET env var. Fail closed if unset.
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+
 
 # ── F6: Admin onboarding endpoint auth ────────────────────────────────
 # Separate secret for POST /api/admin/clients. Fail closed if unset.
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+
+# ── Redis Queue ──────────────────────────────────────────────────────
+# Used by RQ workers to process webhook jobs off the HTTP hot path.
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ── Inbound lead creation guard ───────────────────────────────────────────
 # Numbers in this list will be silently dropped and never auto-created as
 # leads. Add spam callers or known bot numbers here as plain strings
 # (no + prefix needed, normalisation is done at call-site).
 BLOCKED_NUMBERS: list[str] = []
+
+# ── Razorpay Billing ─────────────────────────────────────────────────────
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+RAZORPAY_PLAN_ID_BASE = os.getenv("RAZORPAY_PLAN_ID_BASE", "")
+RAZORPAY_PLAN_ID_AGENCY = os.getenv("RAZORPAY_PLAN_ID_AGENCY", "")

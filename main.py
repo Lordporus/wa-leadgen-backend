@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, Security, Depends, BackgroundTasks, Response
+from fastapi import FastAPI, Request, HTTPException, Security, Depends, BackgroundTasks, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
@@ -18,7 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
     FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, BLOCKED_NUMBERS,
-    ADMIN_SECRET, MIGRATION_MODE,
+    ADMIN_SECRET, MIGRATION_MODE, JWT_SECRET, REDIS_URL,
 )
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
@@ -28,7 +28,9 @@ from webhook_store import WebhookStore
 import tenant
 from database import SessionLocal
 from sqlalchemy import text
-from models import Client, PipelineStage
+from models import Client, PipelineStage, PromptTemplate
+from redis import Redis
+from rq import Queue as RQQueue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +38,10 @@ logger = logging.getLogger(__name__)
 whatsapp = WhatsAppClient()
 store = get_store()
 calendly = CalendlyClient()
+
+# ── Redis queue for webhook jobs ─────────────────────────────────────────
+redis_conn = Redis.from_url(REDIS_URL) if REDIS_URL else None
+webhook_queue = RQQueue("webhooks", connection=redis_conn) if redis_conn else None
 
 # ── Pydantic request bodies ───────────────────────────────────────────────
 
@@ -162,6 +168,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="WhatsApp Acquisition Backend", lifespan=lifespan)
 
+if not WHATSAPP_APP_SECRET:
+    raise RuntimeError(
+        "WHATSAPP_APP_SECRET must be set. "
+        "Refusing to start without webhook signature verification."
+    )
+
 def get_client_key(request: Request) -> str:
     api_key = request.headers.get("X-API-Key")
     ip = get_remote_address(request)
@@ -194,6 +206,94 @@ def require_api_key(api_key: str = Security(_api_key_header)) -> Client:
 
     # 2. Neither matched
     raise HTTPException(status_code=403, detail="Invalid or missing API key")
+
+# ── JWT Authentication ────────────────────────────────────────────────────
+import jwt as pyjwt
+
+_JWT_ALGORITHM = "HS256"
+_JWT_EXPIRY_HOURS = 24
+
+class LoginBody(BaseModel):
+    api_key: str
+
+def verify_jwt(request: Request) -> Client:
+    """
+    Dependency: decode and verify a JWT from the Authorization header.
+    Returns the Client ORM row for the authenticated tenant.
+    Fails closed: missing/invalid/expired token → 401.
+    """
+    if not JWT_SECRET:
+        raise HTTPException(status_code=503, detail="JWT_SECRET is not configured on the server")
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+
+    token = auth_header.split(" ", 1)[1]
+    try:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    client_id = payload.get("client_id")
+    if not client_id:
+        raise HTTPException(status_code=401, detail="Token missing client_id")
+
+    client = tenant.load_client(client_id)
+    if not client or not client.is_active:
+        raise HTTPException(status_code=401, detail="Client not found or inactive")
+
+    return client
+
+
+def require_admin(request: Request) -> Client:
+    """
+    Dependency: verify JWT and enforce role == "admin".
+    Returns the Client ORM row. Raises 403 if the token is valid but
+    the role is not admin.
+    """
+    client = verify_jwt(request)
+
+    if not JWT_SECRET:
+        raise HTTPException(status_code=503, detail="JWT_SECRET is not configured on the server")
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.split(" ", 1)[1]
+    payload = pyjwt.decode(token, JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    return client
+
+
+@app.post("/auth/login")
+@limiter.limit("10/minute")
+def login(request: Request, response: Response, body: LoginBody):
+    """
+    Authenticate with a client API key and receive a signed JWT.
+    The raw API key is validated against the hashed key in the clients table.
+    """
+    if not JWT_SECRET:
+        raise HTTPException(status_code=503, detail="JWT_SECRET is not configured on the server")
+
+    ctx = tenant.resolve_context_by_api_key(body.api_key)
+    if not ctx:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    now = datetime.utcnow()
+    payload = {
+        "client_id": ctx.client.id,
+        "tenant_id": ctx.client.id,
+        "role": "admin",
+        "iat": now,
+        "exp": now + timedelta(hours=_JWT_EXPIRY_HOURS),
+    }
+    token = pyjwt.encode(payload, JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+    return {"access_token": token, "token_type": "bearer", "expires_in": _JWT_EXPIRY_HOURS * 3600}
 
 @app.get("/api/settings")
 @limiter.limit("120/minute", key_func=get_client_key)
@@ -253,6 +353,34 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
     
     return {"success": True}
 
+# ── Template library endpoints ────────────────────────────────────────────
+
+@app.get("/api/templates", dependencies=[Depends(require_api_key)])
+@limiter.limit("120/minute", key_func=get_client_key)
+def list_templates(request: Request, response: Response):
+    if not SessionLocal:
+        return []
+    with SessionLocal() as s:
+        templates = s.query(PromptTemplate).order_by(PromptTemplate.id).all()
+        return [
+            {"slug": t.slug, "niche": t.niche, "display_name": t.display_name, "is_default": t.is_default}
+            for t in templates
+        ]
+
+@app.get("/api/templates/{slug}", dependencies=[Depends(require_api_key)])
+@limiter.limit("120/minute", key_func=get_client_key)
+def get_template(request: Request, response: Response, slug: str, client: Client = Depends(require_api_key)):
+    if not SessionLocal:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    with SessionLocal() as s:
+        template = s.query(PromptTemplate).filter(PromptTemplate.slug == slug).first()
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+        body = template.body
+        body = body.replace("{{agency_name}}", client.company_display_name or client.name or "Our Agency")
+        body = body.replace("{{calendly_link}}", client.calendly_link or "")
+        return {"slug": template.slug, "niche": template.niche, "display_name": template.display_name, "body": body}
+
 # ── CORS ──────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
@@ -280,7 +408,7 @@ def require_admin_secret(secret: str = Security(_admin_secret_header)):
         raise HTTPException(status_code=401, detail="Invalid or missing admin secret")
 
 
-@app.post("/api/admin/clients", dependencies=[Depends(require_admin_secret)])
+@app.post("/api/admin/clients", dependencies=[Depends(require_admin_secret), Depends(require_admin)])
 @limiter.limit("10/minute", key_func=get_admin_key)
 def admin_create_client(request: Request, response: Response, body: AdminCreateClientBody):
     """
@@ -656,9 +784,142 @@ def update_lead_stage(request: Request, response: Response, lead_id: str, body: 
 
     return {"success": True, "stage": body.stage}
 
+@app.post("/api/leads/{lead_id}/takeover", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/minute", key_func=get_client_key)
+def takeover_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
+    """Pause AI for this lead — human takes over the conversation."""
+    from models import Lead
+    with SessionLocal() as s:
+        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead.is_human_takeover = True
+        s.commit()
+    return {"success": True, "lead_id": lead_id, "is_human_takeover": True}
+
+@app.post("/api/leads/{lead_id}/release", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/minute", key_func=get_client_key)
+def release_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
+    """Resume AI for this lead — end human takeover."""
+    from models import Lead
+    with SessionLocal() as s:
+        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead.is_human_takeover = False
+        s.commit()
+    return {"success": True, "lead_id": lead_id, "is_human_takeover": False}
+
+
+# ── Document / Knowledge Base endpoints ────────────────────────────────────
+
+@app.post("/api/documents/upload", dependencies=[Depends(require_api_key)])
+@limiter.limit("10/minute", key_func=get_client_key)
+def upload_document(request: Request, response: Response, file: UploadFile, client: Client = Depends(require_api_key)):
+    """Upload a PDF or TXT file to the tenant's knowledge base."""
+    from usage import check_limit
+    plan = client.plan_tier or "base"
+    allowed, reason = check_limit(client.id, "document_upload", plan=plan)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10 MB.")
+
+    fname = file.filename or "upload"
+    ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+
+    if ext not in ("pdf", "txt"):
+        raise HTTPException(status_code=400, detail="Only PDF and TXT files are supported.")
+
+    raw = file.file.read(MAX_FILE_SIZE + 1)
+    if len(raw) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10 MB.")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    if ext == "pdf":
+        from pypdf import PdfReader
+        import io
+        reader = PdfReader(io.BytesIO(raw))
+        text_content = "\n".join(page.extract_text() or "" for page in reader.pages)
+    else:
+        text_content = raw.decode("utf-8", errors="replace")
+
+    if not text_content.strip():
+        raise HTTPException(status_code=400, detail="Could not extract any text from file.")
+
+    from ingestion import ingest_document
+    stored = ingest_document(client.id, fname, text_content)
+    return {"success": True, "filename": fname, "chunks_stored": stored}
+
+
+@app.get("/api/documents", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/minute", key_func=get_client_key)
+def list_documents(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """List distinct documents uploaded by this tenant."""
+    from models import Document as DocModel
+    from sqlalchemy import func
+    with SessionLocal() as s:
+        rows = (
+            s.query(DocModel.filename, func.count(DocModel.id), func.min(DocModel.created_at))
+            .filter(DocModel.client_id == client.id)
+            .group_by(DocModel.filename)
+            .order_by(func.min(DocModel.created_at).desc())
+            .all()
+        )
+        return [
+            {"filename": r[0], "chunks": r[1], "uploaded_at": r[2].isoformat() if r[2] else None}
+            for r in rows
+        ]
+
+
+# ── Billing endpoints ──────────────────────────────────────────────────────
+
+@app.post("/api/billing/checkout", dependencies=[Depends(require_api_key)])
+@limiter.limit("10/minute", key_func=get_client_key)
+def billing_checkout(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """Create a Razorpay order for the client's plan upgrade."""
+    from billing import create_subscription
+    plan = request.query_params.get("plan", "base")
+    try:
+        result = create_subscription(client.id, plan)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/api/billing/webhook")
+@limiter.limit("100/minute")
+async def billing_webhook(request: Request, response: Response):
+    """Receive and verify Razorpay webhook events."""
+    from billing import verify_webhook_signature, handle_webhook
+
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    body_bytes = await request.body()
+
+    if not verify_webhook_signature(body_bytes, signature):
+        logger.warning("Invalid Razorpay webhook signature rejected.")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    import json
+    try:
+        event_data = json.loads(body_bytes)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    result = handle_webhook(event_data)
+    return {"status": "ok", "result": result}
+
+
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
-    if not WHATSAPP_APP_SECRET or not signature_header:
+    if not signature_header:
         return False
     expected_sig = hmac.new(
         WHATSAPP_APP_SECRET.encode('utf-8'),
@@ -698,6 +959,7 @@ def _process_analytics_and_extraction_bg(
     user_text: str,
     lead_name: str,
     system_prompt: str | None,
+    calendly_link: str | None,
     req_won_stages: list,
     req_lost_stages: list,
     lord_phone: str | None
@@ -708,12 +970,9 @@ def _process_analytics_and_extraction_bg(
     """
     from store import get_store
     from gemini_client import GeminiClient
-    from whatsapp_client import WhatsAppClient
-    
-    # Instantiate fresh clients per constraint #1 and #2
+
     store = get_store()
-    req_gemini = GeminiClient(system_prompt=system_prompt)
-    whatsapp = WhatsAppClient()
+    req_gemini = GeminiClient(system_prompt=system_prompt, calendly_link=calendly_link)
     
     score = None
     
@@ -768,9 +1027,11 @@ def _process_analytics_and_extraction_bg(
 
 @app.post("/webhook")
 @limiter.limit("1000/minute")
-async def receive_message(request: Request, response: Response, bg_tasks: BackgroundTasks):
+async def receive_message(request: Request, response: Response):
     """
     Receive incoming messages from WhatsApp users.
+    Fast-ACK: HMAC verify → dedup → enqueue RQ job → return 200.
+    All LLM calls, store operations, and WhatsApp sends happen in the worker.
     """
     # 1. Verify signature
     signature = request.headers.get("X-Hub-Signature-256")
@@ -780,135 +1041,46 @@ async def receive_message(request: Request, response: Response, bg_tasks: Backgr
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     body = await request.json()
-    
-    # Use decoupled background-capable store for webhook flow
-    store = WebhookStore(get_primary_store(), get_secondary_store(), bg_tasks)
-    
+
     if body.get("object") == "whatsapp_business_account":
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
-                
-                # ── F6: Webhook routing by phone_number_id ────────────────
                 phone_number_id = value.get("metadata", {}).get("phone_number_id")
-                ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
-                
-                if not ctx:
-                    if MIGRATION_MODE == "airtable" or not tenant.is_configured():
-                        # Fallback for client #1 during transition / airtable mode
-                        fallback_client = tenant.load_client(CLIENT_ID)
-                        req_gemini = tenant.get_gemini_for_client(fallback_client)
-                        req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
-                        req_lost_stages = tenant.get_lost_stage_names(CLIENT_ID)
-                    else:
-                        logger.warning(f"Unknown phone_number_id: {phone_number_id}")
-                        return {"status": "ignored"}
-                else:
-                    req_gemini = ctx.gemini
-                    req_won_stages = ctx.won_stages
-                    req_lost_stages = ctx.lost_stages
 
-                # Check for incoming messages
                 if "messages" in value:
                     for message in value["messages"]:
-                        sender_phone = message.get("from")
-                        message_type = message.get("type")
-                        
-                        # ── FIX 1: Hard guard — ignore any message from LORD_PHONE_NUMBER ──
-                        # Normalise both sides (strip +, spaces, dashes) before comparing.
-                        normalized_sender = sender_phone.replace('+', '').replace(' ', '').replace('-', '') if sender_phone else ''
-                        normalized_lord   = LORD_PHONE_NUMBER.replace('+', '').replace(' ', '').replace('-', '') if LORD_PHONE_NUMBER else ''
-                        if normalized_lord and normalized_sender == normalized_lord:
-                            logger.warning(f"Ignored: message from LORD_PHONE_NUMBER ({sender_phone}) — loop guard triggered.")
-                            continue
-
-                        # ── Dedup guard: persistent check happens at append_message below ──
                         msg_id = message.get("id", "")
 
-                        if message_type == "text":
-                            user_text = message["text"]["body"]
-                            logger.info(f"Received message from {sender_phone}: {user_text}")
-                            
-                            lead = store.get_lead(sender_phone)
-                            if not lead:
-                                # ── Guard 1: Meta test numbers (start with 1555) ──
-                                if sender_phone and sender_phone.lstrip('+').startswith('1555'):
-                                    logger.info(f"Ignored Meta test number: {sender_phone}")
-                                    continue
-
-                                # ── Guard 2: Manually blocked numbers ────────────
-                                normalized_sender_clean = sender_phone.replace('+', '').replace(' ', '').replace('-', '') if sender_phone else ''
-                                blocked_clean = [n.replace('+', '').replace(' ', '').replace('-', '') for n in BLOCKED_NUMBERS]
-                                if normalized_sender_clean in blocked_clean:
-                                    logger.info(f"Ignored blocked number: {sender_phone}")
-                                    continue
-
-                                # ── Auto-create new inbound lead ─────────────────
-                                logger.info(f"New unknown number {sender_phone} — creating lead automatically.")
-                                new_record = store.add_lead(
-                                    name="Unknown",
-                                    phone=sender_phone,
-                                    source="Inbound WhatsApp",
-                                )
-                                if not new_record:
-                                    logger.error(f"Failed to create lead for {sender_phone}. Dropping message.")
-                                    continue
-                                
-                                lead = new_record
-                                
-                            # ── Persistent Idempotency Check ──
-                            # Attempt to append the message with its wamid. 
-                            # If it fails due to a unique constraint violation, it's a duplicate retry.
-                            appended = store.append_message(sender_phone, direction="inbound", message=user_text, msg_type="text", wa_message_id=msg_id)
-                            if not appended:
-                                logger.info(f"Duplicate webhook skipped | wamid: {msg_id} | phone: {sender_phone}")
+                        # Redis dedup: SETNX returns False if key already exists
+                        if msg_id and redis_conn:
+                            dedup_key = f"wamid:{msg_id}"
+                            if not redis_conn.setnx(dedup_key, 1):
+                                logger.info(f"Duplicate webhook deduped at Redis | wamid: {msg_id}")
                                 continue
-                            
-                            current_status = lead.get("fields", {}).get("Status", "New Lead")
-                            
-                            # Update lead status to "Contacted" if currently "New Lead"
-                            if current_status == "New Lead":
-                                store.update_lead_status(sender_phone, "Contacted")
-                                
-                            # Phase 4: AI Routing & Scoring
-                            last_message = lead.get("fields", {}).get("Last_Message", "")
-                            # Manually append the inbound message to memory for Gemini to parse
-                            updated_last_message = last_message + f"\n[INBOUND - text]\n{user_text}\n"
-                            
-                            parsed_history = req_gemini.parse_conversation_history(updated_last_message)
-                            
-                            ai_reply = req_gemini.generate_response_with_history(parsed_history, user_text)
-                            wamid = whatsapp.send_message(sender_phone, ai_reply)
-                            store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid)
-                            
-                            # Manually append the outbound message to memory for scoring
-                            updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
-                            
-                            # Submit remaining LLM processing + CRM + Alerts to Background Tasks
-                            lead_name = lead.get("fields", {}).get("Name", "Unknown") if isinstance(lead, dict) else lead.business_name
-                            
-                            bg_tasks.add_task(
-                                _process_analytics_and_extraction_bg,
-                                sender_phone,
-                                updated_last_message,
-                                user_text,
-                                lead_name,
-                                getattr(req_gemini, "system_prompt", None),
-                                req_won_stages,
-                                req_lost_stages,
-                                LORD_PHONE_NUMBER
+                            redis_conn.expire(dedup_key, 86400)
+
+                        # Enqueue for background processing
+                        if webhook_queue:
+                            from jobs import process_webhook_message
+                            webhook_queue.enqueue(
+                                process_webhook_message,
+                                phone_number_id=phone_number_id,
+                                message_data=message,
+                            )
+                        else:
+                            logger.error("Redis queue not available — message dropped")
+
+                if "statuses" in value:
+                    for status in value["statuses"]:
+                        if webhook_queue:
+                            from jobs import process_status_update
+                            webhook_queue.enqueue(
+                                process_status_update,
+                                status_data=status,
                             )
 
-                            
-                # Check for message status updates (delivered/read)
-                elif "statuses" in value:
-                    for status in value["statuses"]:
-                        wamid = status["id"]
-                        status_str = status["status"]
-                        logger.info(f"Message {wamid} to {status['recipient_id']} status: {status_str}")
-                        store.update_message_status(wamid, status_str)
-                            
-        return {"status": "success"}
+        return {"status": "queued"}
     return {"status": "ignored"}
 
 
@@ -1067,28 +1239,3 @@ def analytics_sources(request: Request, response: Response, client: Client = Dep
             for row in results
         ]
 
-# Trigger reload
-
-@app.get('/api/debug')
-def debug_leads():
-    return {'store_type': str(type(store)), 'primary_type': str(type(store._primary)), 'ok': getattr(store._primary, 'ok', 'N/A'), 'len_leads': len(store.get_all_leads())}
-
-@app.get('/debug/runtime')
-def debug_runtime():
-    import os
-    import main as _main_mod
-    from dotenv import find_dotenv
-    from config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, MIGRATION_MODE
-    _primary = getattr(store, '_primary', store)
-    return {
-        "cwd":                  os.getcwd(),
-        "__file__":             _main_mod.__file__,
-        "find_dotenv":          find_dotenv(),
-        "AIRTABLE_API_KEY":     bool(AIRTABLE_API_KEY),
-        "AIRTABLE_BASE_ID":     AIRTABLE_BASE_ID,
-        "AIRTABLE_TABLE_NAME":  AIRTABLE_TABLE_NAME,
-        "MIGRATION_MODE":       MIGRATION_MODE,
-        "type_store":           str(type(store)),
-        "type_store_primary":   str(type(_primary)),
-        "store_primary_ok":     getattr(_primary, 'ok', 'N/A'),
-    }

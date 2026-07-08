@@ -84,11 +84,12 @@ def get_gemini_for_client(client: "Client | None") -> "GeminiClient":  # type: i
     """
     from gemini_client import GeminiClient
     prompt = (client.system_prompt or "").strip() if client else ""
+    calendly = (client.calendly_link or "").strip() if client else ""
     if prompt:
         logger.info(f"Using per-client system prompt for tenant {client.id}.")
     else:
         logger.info("No per-client prompt found — using default system prompt.")
-    return GeminiClient(system_prompt=prompt or None)
+    return GeminiClient(system_prompt=prompt or None, calendly_link=calendly or None)
 
 
 def get_pipeline_stages(client_id: int) -> list:
