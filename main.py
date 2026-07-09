@@ -361,8 +361,79 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
                     stage.is_lost = stage_update.is_lost
         
         s.commit()
-    
+
     return {"success": True}
+
+# ── Sprint 9: White-label branding endpoints ───────────────────────────────
+
+# Accepts #RGB or #RRGGBB (case-insensitive). Anchored so no extra chars slip in.
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+class BrandingUpdateBody(BaseModel):
+    brand_color: str | None = None
+    logo_url: str | None = None
+    company_display_name: str | None = None
+
+
+@app.get("/api/settings/branding")
+@limiter.limit("120/minute", key_func=get_client_key)
+def get_branding(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """Return the tenant's white-label branding fields (theme customization)."""
+    if not SessionLocal:
+        return {"brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM"}
+    with SessionLocal() as s:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+        return {
+            "brand_color": db_client.brand_color or "#C8A96E",
+            "logo_url": db_client.logo_url or "",
+            "company_display_name": db_client.company_display_name or db_client.name or "Leadgen CRM",
+        }
+
+
+@app.post("/api/settings/branding")
+@limiter.limit("60/minute", key_func=get_client_key)
+def update_branding(request: Request, response: Response, body: BrandingUpdateBody, client: Client = Depends(require_api_key)):
+    """
+    Update the tenant's white-label branding. All fields optional (partial
+    update). brand_color, when supplied, must be a valid #RGB / #RRGGBB hex
+    string or the request is rejected 400.
+    """
+    if not SessionLocal:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # ── Validate hex color before touching the DB ─────────────────────
+    if body.brand_color is not None:
+        color = body.brand_color.strip()
+        if not _HEX_COLOR_RE.match(color):
+            raise HTTPException(
+                status_code=400,
+                detail="brand_color must be a valid hex color, e.g. '#C8A96E' or '#FFF'",
+            )
+    else:
+        color = None
+
+    with SessionLocal() as s:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        if color is not None:
+            db_client.brand_color = color
+        if body.logo_url is not None:
+            db_client.logo_url = body.logo_url
+        if body.company_display_name is not None:
+            db_client.company_display_name = body.company_display_name
+
+        s.commit()
+
+        return {
+            "success": True,
+            "brand_color": db_client.brand_color or "#C8A96E",
+            "logo_url": db_client.logo_url or "",
+            "company_display_name": db_client.company_display_name or db_client.name or "Leadgen CRM",
+        }
 
 # ── Template library endpoints ────────────────────────────────────────────
 

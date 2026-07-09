@@ -252,11 +252,43 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - [x] Read docs/06_API_SPECIFICATION.md before implementing
 - **Note:** Reuses the last-30-days IST-keyed `daily_stats` aggregation from `analytics_summary` (main.py:1292), but over `client_id IN (agency's sub_account ids)` via a single `.in_()` query (backed by `idx_clients_agency_id`). Returns `{start_date, end_date, sub_account_count, totals, sub_accounts:[{id,name,totals}]}`. `totals` sums the 9 metric keys; `avg_response_time_seconds` is a message-weighted mean (None days skipped, never zero-filled — same honesty rule as summary); `conversion_rate` = booked/total ×100. Both combined and per-sub totals carry these derived fields. Agency's own row is never included (filter is `role == "sub_account"`); agencies with zero subs get empty totals + `sub_account_count: 0`. Only main.py + this CLAUDE.md touched — no new imports (Client/DailyStat imported locally, matching existing analytics endpoints).
 
-## Sprint 9 (after Sprint 8 complete)
-- Custom domains (Cloudflare integration)
-- Theme customization per tenant
-- Client-facing dashboards
-- White-label branding
+## Sprint 9 — White-Labeling & UI Polish (current)
+
+### Task 1: Theme Customization API ✅
+- [x] Add GET /api/settings/branding endpoint (main.py:378):
+  - Auth: require_api_key
+  - Returns: brand_color, logo_url, company_display_name from clients table
+- [x] Add POST /api/settings/branding endpoint (main.py:395):
+  - Auth: require_api_key
+  - Accepts: brand_color (hex validation), logo_url, company_display_name
+  - Updates clients table
+- [x] Read docs/08_FRONTEND_SPECIFICATION.md before implementing
+- **Note:** Dedicated branding endpoints carved out from the broader `/api/settings` PATCH (which still also writes these fields — left untouched for back-compat). GET returns the 3 white-label fields with the same defaults as `get_settings` (`brand_color` → "#C8A96E", `company_display_name` → name → "Leadgen CRM"). POST is a partial update: all 3 fields optional; only non-null fields written. Hex validated via module-level `_HEX_COLOR_RE = ^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$` (accepts #RGB and #RRGGBB, case-insensitive; value `.strip()`ed first) — invalid → 400 *before* any DB write. POST echoes back the persisted branding block. `re` + `BaseModel` already imported; no new deps. Spec §18 (tenant-overridable primary color via CSS vars) + §15 (white-label color/logo) confirm scope stays logo/color/name — no custom CSS (per Open Question §5). Only main.py + this CLAUDE.md touched.
+
+### Task 2: Frontend White-Label Theme ✅
+- [x] In frontend — read brand_color + company_display_name from /api/settings/branding on dashboard load
+- [x] Apply brand_color as CSS variable --brand-color across dashboard
+- [x] Replace hardcoded "AI Sales OS" title with company_display_name
+- [x] Show logo_url in sidebar if set
+- [x] Read docs/08_FRONTEND_SPECIFICATION.md before implementing
+- **Note:** Only `frontend/src/app/(dashboard)/layout.tsx` touched. A branding scaffold already existed there but fetched the old `/api/settings`, set `--brand` (not `--brand-color`), and never rendered `logo_url`. Changes: (1) SWR fetch switched to `/api/settings/branding` (Task 1 endpoint, via the `[...path]` proxy which injects X-API-Key); (2) added `--brand-color` to the injected `:root` `<style>` block (kept `--brand`/`--brand-dim`/`--brand-bright`/`--gold` for back-compat with existing components); (3) sidebar now renders `<img src={logo_url} alt={company_display_name} class="max-h-8 w-auto object-contain">` when `logo_url` is set, else falls back to the text `<Logo>`. No literal "AI Sales OS" existed in the frontend — the hardcoded product name was "Leadgen CRM"; `company_display_name` already drives the sidebar title (text Logo label + footer) and now the logo `alt`. `tsc --noEmit` clean. No backend files touched.
+
+### Task 3: UI Polish Pass ✅
+- [x] Fix any hardcoded dental niche references in frontend (TD-5 from audit)
+- [x] Replace hardcoded pipeline stages with dynamic fetch from /api/pipeline-stages
+- [x] Ensure all dashboard pages handle empty states gracefully (no leads, no messages, no docs)
+- [x] Read docs/08_FRONTEND_SPECIFICATION.md before implementing
+- **Note:** Frontend-only task. Files: NEW `frontend/src/features/leads/hooks/useStages.ts`; edited `(dashboard)/leads/page.tsx`, `(dashboard)/settings/page.tsx`, `features/leads/components/KanbanBoard.tsx`, `features/leads/components/LeadProfileSidebar.tsx`. `tsc --noEmit` + `next lint` clean.
+- **Note — dental (TD-5):** Audit's TD-5 root cause is *backend* (`_parse_interest` in main.py, hardcoded treatment regex) — left untouched since this task is frontend-scoped and backend edits were out of scope. Only ONE dental string existed in the frontend: settings branding placeholder `"e.g. Acme Dental CRM"` → changed to `"e.g. Acme Leads CRM"`. No other niche text (teeth/clinic/patient/etc.) anywhere in `frontend/src`.
+- **Note — dynamic stages:** ⚠️ `GET /api/pipeline-stages` does NOT exist in the backend (verified: only stage source is `GET /api/settings` → `pipeline_stages:[{id,name,position,is_won,is_lost}]`). Built `useStages()` hook that reads from `/api/settings`, sorts by `position`, returns names; falls back to DEFAULT_STAGES `[New Lead, Contacted, Qualified, Booked, Lost]` before load / when tenant has none (Airtable/503 mode returns []). Wired into: leads filter chips, KanbanBoard columns (grid now `repeat(N,1fr)` not hardcoded 5), LeadProfileSidebar stage `<select>` (+ safety `<option>` so a lead's current stage stays selectable even if renamed out of config). Left color-only lookups (`utils.ts STAGE_COLORS`, analytics `STAGE_ORDER`, donut) as-is — they degrade to gold fallback for custom names and rewiring risks chart breakage; not interactive stage lists. If a dedicated `/api/pipeline-stages` route is added later, only `useStages.ts` changes.
+- **Note — empty states:** Leads page → NEW `LeadsEmptyState` ("No leads yet" + WhatsApp hint; filter-aware variant "No leads in '{stage}'"). Conversations page → ALREADY had a polished "No conversations yet" empty state (unchanged). Documents ("no docs") → ⚠️ NO documents page exists in the frontend (nav is Dashboard/Leads/Conversations/Pipeline/Analytics/Settings; backend `GET /api/documents` exists but has no UI). Nothing to add an empty state to — a Documents page is net-new UI, out of scope for a polish task. Flagged for a future sprint.
+
+## Sprint 10 (after Sprint 9 complete)
+- Load testing (k6)
+- APM integration (Sentry)
+- DB indexing review
+- Production readiness checklist
+- M3 Agency Beta release
 
 ## Technical Debt
 - db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default for backward compat — must be updated in Sprint 3
