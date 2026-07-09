@@ -20,7 +20,7 @@ services:
       - key: NINEROUTER_API_KEY
         sync: false
       - key: NINEROUTER_BASE_URL
-        value: "http://13.234.20.175:20128/v1"
+        value: "https://13.234.20.175:20128/v1"
       - key: NINEROUTER_MODEL
         value: "wa-leadgen-backend-fallback-chain"
       - key: AIRTABLE_API_KEY
