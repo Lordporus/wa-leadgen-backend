@@ -14,10 +14,12 @@ works against Postgres data with zero changes:
     [YYYY-MM-DD HH:MM:SS] SYSTEM (system): <event note>
 """
 
-from datetime import datetime
+from datetime import datetime, date as date_type
 from sqlalchemy import (
-    Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float
+    Integer, String, Text, DateTime, Date, ForeignKey, Index, Boolean, Float,
+    UniqueConstraint
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from database import Base
@@ -231,3 +233,33 @@ class UsageEvent(Base):
 
     def __repr__(self) -> str:
         return f"<UsageEvent id={self.id} type={self.event_type!r} tokens={self.tokens_used}>"
+
+
+class DailyStat(Base):
+    """
+    Sprint 7 — nightly analytics rollup.
+
+    One row per (client_id, date). `stats` is a JSONB blob holding the
+    aggregated metrics produced by analytics.rollup_daily_stats() so the
+    schema can grow new KPIs without a migration each time.
+
+    The (client_id, date) uniqueness lets the rollup job UPSERT — re-running
+    it for the same day overwrites rather than duplicates.
+    """
+    __tablename__ = "daily_stats"
+
+    id:        Mapped[int]           = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int]           = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    date:      Mapped[date_type]     = mapped_column(Date, nullable=False)
+    stats:     Mapped[dict]          = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime]     = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    client: Mapped["Client"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "date", name="uq_daily_stats_client_date"),
+        Index("idx_daily_stats_client_date", "client_id", "date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DailyStat id={self.id} client_id={self.client_id} date={self.date}>"

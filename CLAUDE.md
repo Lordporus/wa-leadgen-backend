@@ -187,10 +187,46 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - [x] Read docs/13_PRODUCT_ROADMAP.md and docs/14_FINAL_PRD.md before implementing
 - **Note:** Health check returns "degraded" if DB is unreachable (Redis being down is tolerable). Self-serve signup deferred to Q3 per roadmap — beta uses admin provisioning only.
 
-## Sprint 7 (after Sprint 6 complete)
-- Campaign/Drip Engine
-- Advanced analytics
-- Multi-channel support
+## Sprint 7 — Analytics & Reporting (current)
+
+### Task 1: Nightly Rollup Jobs ✅
+- [x] Create backend/analytics.py
+- [x] Function: rollup_daily_stats(client_id, date) — aggregates from leads + messages tables:
+  - total_leads, new_leads, qualified_leads, booked_leads, lost_leads
+  - total_messages, ai_messages, human_messages
+  - avg_response_time_seconds
+  - meetings_booked (leads where status = "Booked")
+- [x] Store results in a new daily_stats table (via Alembic migration 0006)
+- [x] daily_stats columns: id, client_id, date, stats JSONB
+- [x] Schedule via APScheduler: run every night at 2 AM IST
+- [x] Read docs/13_PRODUCT_ROADMAP.md before implementing
+- **Note:** Migration 0006 NOT yet applied to production (generate-only, matching 0004/0005). `alembic heads` = 0006. Existing prod DB → apply with `alembic stamp`-awareness per prior runs.
+- **Note:** No human-agent send path exists (takeover only *pauses* the AI), so ai_messages = OUTBOUND, human_messages = INBOUND (the prospect). SYSTEM messages count in total_messages only.
+- **Note:** No status-history table — status buckets (new/qualified/booked/lost) are a point-in-time snapshot of leads *created* that IST day. qualified_leads includes Booked. booked_leads/lost_leads use tenant.get_won_stage_names / get_lost_stage_names (default ["Booked"]/["Lost"]).
+- **Note:** created_at is UTC-naive; the rollup converts the IST calendar day to a UTC [start,end) window before querying. Job rolls up YESTERDAY (IST) and runs 02:00 Asia/Kolkata via CronTrigger (explicit tz — Render runs UTC). avg_response_time_seconds is None when no answerable outbound that day.
+
+### Task 2: Dashboard KPI Endpoints ✅
+- [x] Add these endpoints to main.py:
+  - [x] GET /api/analytics/summary — returns last 30 days rollup for tenant
+  - [x] GET /api/analytics/funnel — lead stage conversion counts
+  - [x] GET /api/analytics/response-time — avg AI response time trend (7 days)
+- [x] All endpoints: Auth require_api_key, tenant-scoped
+- [x] Read docs/06_API_SPECIFICATION.md before implementing
+- **Note:** `summary` (main.py:1147) and `response-time` (main.py:1227) read the pre-computed `daily_stats` table (from Task 1), not raw tables — matches analytics.py's design intent. `funnel` (main.py:1210) is a live current-snapshot of leads-by-status (pre-existing, spec-correct, left as-is).
+- **Note:** `response-time` was previously a live window-function query over raw messages (14-day). Replaced with a 7-day rollup-based trend per spec. Days with no answerable outbound carry `avg_seconds: null` (not 0); window average is message-weighted. Old `/bookings` and `/sources` analytics endpoints untouched.
+- **Note:** Both new endpoints key off IST calendar dates (matching daily_stats keys). Only main.py touched (+ one import: `timezone`).
+
+### Task 3: Frontend Analytics Page ✅
+- [x] Update frontend analytics page to consume new endpoints
+- [x] Show: KPI cards (total leads, booked, conversion rate), funnel chart, response time chart
+- [x] Use existing Recharts setup already in frontend
+- [x] Read docs/08_FRONTEND_SPECIFICATION.md before implementing
+- **Note:** Only `frontend/src/app/(dashboard)/analytics/page.tsx` touched. Added `/api/analytics/summary` SWR fetch → 3 KPI cards (Total Leads, Booked, Conversion Rate) from `summary.totals`, labeled "Last 30 days". Funnel (horizontal Recharts BarChart) already wired, left as-is. Response-time card FIXED: old code rendered `median_seconds`/`max_seconds` which Task 2 backend no longer returns — now shows single "Average (7 days)" stat + LineChart trend with `connectNulls={false}` so null days render as gaps (not false zeros). Auth is transparent: page calls relative `/api/...` via SWR `fetcher`; the Next.js proxy (`app/api/[...path]/route.ts`) injects `X-API-Key` server-side. Loading = shared skeletons (KPI row + charts); error = "Failed to load analytics data." Kept existing bookings + donut sections (backend endpoints untouched). No backend files modified. `tsc --noEmit` clean.
+
+## Sprint 8 (after Sprint 7 complete)
+- Agency sub-accounts
+- Cross-tenant rollup views
+- Sub-account provisioning APIs
 
 ## Technical Debt
 - db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default for backward compat — must be updated in Sprint 3
