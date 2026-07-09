@@ -223,10 +223,40 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - [x] Read docs/08_FRONTEND_SPECIFICATION.md before implementing
 - **Note:** Only `frontend/src/app/(dashboard)/analytics/page.tsx` touched. Added `/api/analytics/summary` SWR fetch → 3 KPI cards (Total Leads, Booked, Conversion Rate) from `summary.totals`, labeled "Last 30 days". Funnel (horizontal Recharts BarChart) already wired, left as-is. Response-time card FIXED: old code rendered `median_seconds`/`max_seconds` which Task 2 backend no longer returns — now shows single "Average (7 days)" stat + LineChart trend with `connectNulls={false}` so null days render as gaps (not false zeros). Auth is transparent: page calls relative `/api/...` via SWR `fetcher`; the Next.js proxy (`app/api/[...path]/route.ts`) injects `X-API-Key` server-side. Loading = shared skeletons (KPI row + charts); error = "Failed to load analytics data." Kept existing bookings + donut sections (backend endpoints untouched). No backend files modified. `tsc --noEmit` clean.
 
-## Sprint 8 (after Sprint 7 complete)
-- Agency sub-accounts
-- Cross-tenant rollup views
-- Sub-account provisioning APIs
+## Sprint 8 — Agency Sub-Accounts (current)
+
+### Task 1: Agency Role & Sub-Account Model ✅
+- [x] Add agency_id column to clients table (FK to clients.id, nullable) via Alembic migration 0007
+- [x] Add role column to clients table: "owner" / "agency" / "sub_account" (default "owner")
+- [x] Update models.py Client model with these two columns
+- [x] Read docs/10_SECURITY_SPECIFICATION.md before implementing
+- **Note:** Migration 0007 is GENERATE-ONLY, not applied to production (matching 0004/0005/0006). `alembic heads` = 0007, down_revision 0006. Existing prod DB → apply with `alembic stamp`-awareness per prior runs (see [[alembic-first-run]]).
+- **Note:** `role` uses `server_default="owner"` + NOT NULL so all existing client rows backfill as standalone tenants with no data migration. `agency_id` is a self-referential FK (clients.id → clients.id), NULL for owners/agencies, set only on sub_account rows. Added `idx_clients_agency_id` index for the Task 3 rollup query (fetch all sub-accounts where agency_id = client.id). Security spec §1/§6.1/§7 confirm design: agencies see only their own sub-clients; rollups join child tenants only. `ForeignKey` already imported in models.py — no new imports.
+
+### Task 2: Sub-Account Provisioning API ✅
+- [x] Add POST /api/agency/sub-accounts endpoint (main.py:856):
+  - Auth: require_api_key + client.role == "agency" (via require_agency dependency)
+  - Creates a new Client row with agency_id = current client.id, role = "sub_account"
+  - Returns new sub-account's id, name, api_key (plaintext, once) and dashboard_url
+- [x] Add GET /api/agency/sub-accounts endpoint (main.py:944):
+  - Returns list of all sub-accounts under current agency
+- [x] Read docs/06_API_SPECIFICATION.md before implementing
+- **Note:** Auth uses `require_api_key` (per Sprint 8 API-key model, matching Task 1/3), not JWT `require_admin`. New `require_agency` dependency wraps `require_api_key` and enforces `role == "agency"` → 403 otherwise. API-key generation reuses the exact onboarding pattern: `secrets.token_hex(32)` raw key + `hashlib.sha256(...).hexdigest()` stored in `dashboard_api_key_hash`; raw key returned once as `api_key`.
+- **Note:** Sub-account creation seeds the same 5 default pipeline stages as onboarding so the child dashboard is usable immediately. `wa_phone_number_id` is optional here (agency may set it later) but still uniqueness-checked when supplied (409 on conflict). `dashboard_url` derives from `FRONTEND_URL` env var (null if unset — no phone-specific path since routing is API-key based). GET filters `agency_id == client.id AND role == "sub_account"`, ordered by id, returns `{sub_accounts: [...], count}`. Only main.py + this CLAUDE.md touched.
+
+### Task 3: Cross-Tenant Rollup View ✅
+- [x] Add GET /api/agency/analytics endpoint (main.py:974):
+  - Auth: require_agency (require_api_key + role == "agency")
+  - Aggregates daily_stats across all sub-accounts (agency_id = client.id)
+  - Returns combined totals + per-sub-account breakdown
+- [x] Read docs/06_API_SPECIFICATION.md before implementing
+- **Note:** Reuses the last-30-days IST-keyed `daily_stats` aggregation from `analytics_summary` (main.py:1292), but over `client_id IN (agency's sub_account ids)` via a single `.in_()` query (backed by `idx_clients_agency_id`). Returns `{start_date, end_date, sub_account_count, totals, sub_accounts:[{id,name,totals}]}`. `totals` sums the 9 metric keys; `avg_response_time_seconds` is a message-weighted mean (None days skipped, never zero-filled — same honesty rule as summary); `conversion_rate` = booked/total ×100. Both combined and per-sub totals carry these derived fields. Agency's own row is never included (filter is `role == "sub_account"`); agencies with zero subs get empty totals + `sub_account_count: 0`. Only main.py + this CLAUDE.md touched — no new imports (Client/DailyStat imported locally, matching existing analytics endpoints).
+
+## Sprint 9 (after Sprint 8 complete)
+- Custom domains (Cloudflare integration)
+- Theme customization per tenant
+- Client-facing dashboards
+- White-label branding
 
 ## Technical Debt
 - db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default for backward compat — must be updated in Sprint 3

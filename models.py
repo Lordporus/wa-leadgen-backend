@@ -68,6 +68,14 @@ class Client(Base):
     subscription_status:      Mapped[str | None] = mapped_column(String(30), default="inactive", nullable=True)
     plan_tier:                Mapped[str | None] = mapped_column(String(20), default="base", nullable=True)
 
+    # ── Sprint 8: agency sub-accounts ─────────────────────────────────────
+    # role:      "owner"       → standalone tenant (default; all existing rows)
+    #            "agency"      → parent tenant that provisions sub-accounts
+    #            "sub_account" → child tenant owned by an agency
+    # agency_id: self-FK to the parent agency's client id (NULL unless sub_account)
+    role:       Mapped[str]        = mapped_column(String(20), default="owner", server_default="owner", nullable=False)
+    agency_id:  Mapped[int | None] = mapped_column(ForeignKey("clients.id"), nullable=True)
+
     leads: Mapped[list["Lead"]] = relationship(back_populates="client")
     pipeline_stages: Mapped[list["PipelineStage"]] = relationship(
         back_populates="client", order_by="PipelineStage.position"
