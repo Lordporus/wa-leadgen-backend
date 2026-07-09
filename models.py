@@ -138,6 +138,13 @@ class Lead(Base):
         return f"<Lead id={self.id} phone={self.phone!r} status={self.status!r}>"
 
 
+# Sprint 10: composite for the hottest tenant-scoped query — "leads of a
+# client filtered by status" (dashboard funnel, stage boards, list filters).
+# Postgres does not auto-index the client_id FK, so this also covers the
+# common client_id-only lookups as a leading-column prefix.
+Index("idx_leads_client_status", Lead.client_id, Lead.status)
+
+
 class Message(Base):
     """Append-only conversation log. Replaces the Airtable long-text field."""
     __tablename__ = "messages"
@@ -163,6 +170,10 @@ class Message(Base):
 
 # Convenient composite index for the follow-up job's "lead by status" queries.
 Index("idx_messages_lead_id", Message.lead_id)
+# Sprint 10: composite for "a lead's messages by direction" — response-time
+# rollups and INBOUND/OUTBOUND counts in analytics.py. Its leading lead_id
+# column also serves plain lead_id lookups.
+Index("idx_messages_lead_direction", Message.lead_id, Message.direction)
 
 
 class PipelineStage(Base):
@@ -241,6 +252,12 @@ class UsageEvent(Base):
 
     def __repr__(self) -> str:
         return f"<UsageEvent id={self.id} type={self.event_type!r} tokens={self.tokens_used}>"
+
+
+# Sprint 10: composite for monthly-usage aggregation in usage.py —
+# "a client's events within the current billing window" (client_id + a
+# created_at range scan). Also covers client_id-only lookups.
+Index("idx_usage_events_client_created", UsageEvent.client_id, UsageEvent.created_at)
 
 
 class DailyStat(Base):

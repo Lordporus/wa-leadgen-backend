@@ -73,3 +73,12 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 RAZORPAY_PLAN_ID_BASE = os.getenv("RAZORPAY_PLAN_ID_BASE", "")
 RAZORPAY_PLAN_ID_AGENCY = os.getenv("RAZORPAY_PLAN_ID_AGENCY", "")
+
+# ── Sentry APM (error + performance monitoring) ──────────────────────────
+# SENTRY_DSN empty → Sentry disabled (safe local-dev / no-op default).
+# Set the DSN in Render to enable. traces_sample_rate defaults to 0.0 so
+# enabling the DSN turns on error capture without incurring tracing cost
+# until performance sampling is explicitly dialled up.
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production")
+SENTRY_TRACES_SAMPLE_RATE = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.0"))

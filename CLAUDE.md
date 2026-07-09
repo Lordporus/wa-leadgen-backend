@@ -283,15 +283,50 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - **Note — dynamic stages:** ⚠️ `GET /api/pipeline-stages` does NOT exist in the backend (verified: only stage source is `GET /api/settings` → `pipeline_stages:[{id,name,position,is_won,is_lost}]`). Built `useStages()` hook that reads from `/api/settings`, sorts by `position`, returns names; falls back to DEFAULT_STAGES `[New Lead, Contacted, Qualified, Booked, Lost]` before load / when tenant has none (Airtable/503 mode returns []). Wired into: leads filter chips, KanbanBoard columns (grid now `repeat(N,1fr)` not hardcoded 5), LeadProfileSidebar stage `<select>` (+ safety `<option>` so a lead's current stage stays selectable even if renamed out of config). Left color-only lookups (`utils.ts STAGE_COLORS`, analytics `STAGE_ORDER`, donut) as-is — they degrade to gold fallback for custom names and rewiring risks chart breakage; not interactive stage lists. If a dedicated `/api/pipeline-stages` route is added later, only `useStages.ts` changes.
 - **Note — empty states:** Leads page → NEW `LeadsEmptyState` ("No leads yet" + WhatsApp hint; filter-aware variant "No leads in '{stage}'"). Conversations page → ALREADY had a polished "No conversations yet" empty state (unchanged). Documents ("no docs") → ⚠️ NO documents page exists in the frontend (nav is Dashboard/Leads/Conversations/Pipeline/Analytics/Settings; backend `GET /api/documents` exists but has no UI). Nothing to add an empty state to — a Documents page is net-new UI, out of scope for a polish task. Flagged for a future sprint.
 
-## Sprint 10 (after Sprint 9 complete)
-- Load testing (k6)
-- APM integration (Sentry)
-- DB indexing review
-- Production readiness checklist
-- M3 Agency Beta release
+## Sprint 10 — Production Hardening & M3 Release (current)
+
+### Task 1: Sentry APM Integration ✅
+- [x] Install sentry-sdk in requirements.txt
+- [x] Initialize Sentry in main.py with SENTRY_DSN env var
+- [x] Capture exceptions on all unhandled errors
+- [x] Add SENTRY_DSN to config.py
+- [x] Read docs/11_INFRASTRUCTURE_SPECIFICATION.md before implementing
+- **Note:** `sentry-sdk[fastapi]>=2.0,<3.0` added to requirements.txt (FastAPI/Starlette ASGI integration auto-enabled by the extra — no manual middleware wiring needed; it captures all unhandled errors app-wide). `sentry_sdk.init()` runs in main.py (line ~44) BEFORE `app = FastAPI(...)` so the ASGI integration instruments every request; guarded by `if SENTRY_DSN:` so it's a clean no-op in local dev (logs "disabled"). config.py adds three vars: `SENTRY_DSN` (default "" = disabled), `SENTRY_ENVIRONMENT` (default "production"), `SENTRY_TRACES_SAMPLE_RATE` (default 0.0 → error capture on, perf tracing off until dialled up). `send_default_pii=False` set — avoids shipping lead PII to Sentry (matches security posture). Spec §13/§19-Phase2 confirm Sentry as the APM choice. Only main.py, config.py, requirements.txt + this CLAUDE.md touched. Env vars for Render: SENTRY_DSN (required to enable), optional SENTRY_ENVIRONMENT / SENTRY_TRACES_SAMPLE_RATE.
+
+### Task 2: DB Indexing Review ✅
+- [x] Read all SQLAlchemy models and identify missing indexes
+- [x] Add indexes for high-frequency query patterns:
+  - [x] leads.client_id + leads.status (composite) → `idx_leads_client_status`
+  - [x] messages.lead_id + messages.direction (composite) → `idx_messages_lead_direction`
+  - [x] daily_stats.client_id + daily_stats.date → CONFIRMED already exists (`idx_daily_stats_client_date`, from migration 0006) — not recreated
+  - [x] usage_events.client_id + usage_events.created_at (composite) → `idx_usage_events_client_created`
+- [x] Create Alembic migration 0008 for new indexes
+- [x] Do NOT run migration yet
+- **Note:** 3 NEW composite indexes added (daily_stats already had its composite). Declared in models.py (module-level `Index()` calls matching the existing `idx_messages_lead_id` style, so ORM metadata ↔ DB stay in sync) AND in migration `alembic/versions/0008_add_composite_indexes.py` (revision 0008, down_revision 0007). Verified via venv: all four tables register the expected index names; `alembic heads` = **0008 (head)**, linear chain `0007 -> 0008`. Migration is GENERATE-ONLY, NOT applied (matching 0004–0007); existing prod DB → apply with `alembic stamp`-awareness per [[alembic-first-run]]. Existing single-col `idx_messages_lead_id` left in place (the new composite's leading `lead_id` makes it redundant, but dropping it is out of scope). Migration uses plain transactional `CREATE INDEX` (tables tiny at beta scale); docstring flags `CREATE INDEX CONCURRENTLY` as the production-scale approach when row counts grow. Files touched: models.py, alembic/versions/0008_add_composite_indexes.py, this CLAUDE.md.
+
+### Task 3: Missing Technical Debt Fixes ✅ (3 of 4; item 4 deferred by decision)
+- [x] Add GET /api/pipeline-stages dedicated endpoint in main.py
+- [x] Build Documents page in frontend (list uploaded docs, upload button)
+- [x] Fix /api/settings PATCH hex validation on brand_color
+- [~] Update db_client.py background task methods to pass client_id (remove None defaults) — **DEFERRED to its own task** (see Technical Debt). Not the one-liner it appears: the 4 methods are never called with client_id; every caller routes through `store.py` (DualWriteStore) + `webhook_store.py` wrappers whose signatures have NO client_id param. Making it required = threading client_id through 6–8 files (db_client, store, webhook_store, airtable_client + callers in jobs/main/profile_webhook/scraper), on the live webhook hot path + dual-write migration path. Some call sites lack client_id in scope (jobs.py appends inbound msg before deriving client_id; profile_webhook has none). Because `leads.phone` is globally `unique=True`, the None path resolves to exactly one lead today — latent risk, not a live tenant-leak. User decision: defer.
+- **Note — item 1 (pipeline-stages):** `GET /api/pipeline-stages` added at main.py:391 (auth require_api_key, 120/min, tenant-scoped). Returns `{pipeline_stages:[{id,name,position,is_won,is_lost}]}` ordered by position (relationship already `order_by=position`). Frontend `useStages.ts` rewired from `/api/settings` → `/api/pipeline-stages` (response shape identical, so only URL + stale comment changed). Resolves the "useStages fetches from /api/settings" debt entry.
+- **Note — item 2 (Documents page):** NEW `frontend/src/app/(dashboard)/documents/page.tsx` (route `/documents`). Lists docs from `GET /api/documents` (`[{filename,chunks,uploaded_at}]`); upload button → multipart `POST /api/documents/upload` via raw `fetch`+FormData (NOT apiFetch — that forces JSON content-type; browser must set the multipart boundary itself). States: loading skeletons, empty ("No documents uploaded yet"), inline upload error (parses backend `detail`), success → SWR `mutate()` refetch. Input `accept=".pdf,.txt"`, resets after pick so same file re-triggers. Nav entry + topbar title + IconFileText added to `(dashboard)/layout.tsx`. Resolves the "Documents page missing" debt entry. `tsc --noEmit` + `next lint` clean.
+- **Note — item 3 (hex on PATCH):** `/api/settings` PATCH now validates `brand_color` against the same `_HEX_COLOR_RE` used by POST /api/settings/branding, BEFORE any DB write → 400 on invalid; value is `.strip()`ed before persist. Closes the gap where the legacy PATCH path could store an unvalidated color that the dedicated branding endpoint would reject.
+
+### Task 4: Production Readiness Checklist
+- Verify all items in PROJECT_BASELINE_AUDIT.md production blockers are resolved
+- Generate a PRODUCTION_READY.md report:
+  - What was fixed (Sprint 1-10)
+  - What is still pending
+  - Deployment checklist for M3 Agency Beta release
+- Read PROJECT_BASELINE_AUDIT.md before implementing
+
+## Post Sprint 10
+- Multi-Channel: Voice AI, Cold Email (Sprint 11-16)
+- Enterprise Scale: SSO, Read replicas (Sprint 17-24)
 
 ## Technical Debt
-- db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default for backward compat — must be updated in Sprint 3
+- db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default — **full scope (deferred from Sprint 10 Task 3):** making client_id required is a 6–8 file refactor. The methods are never called with client_id; callers route through store.py (DualWriteStore) + webhook_store.py wrappers that have NO client_id param, so threading it requires changing db_client.py, store.py, webhook_store.py, airtable_client.py + every call site (jobs.py ×4, main.py ×4, profile_webhook.py ×2, scraper.py ×1). Touches the live webhook hot path + dual-write path; some call sites lack client_id in scope (jobs.py appends inbound before deriving it; profile_webhook has none). Mitigated today by `leads.phone` being globally unique (None path → exactly one lead, no live cross-tenant leak). Do as a dedicated task with its own verification pass.
 - REDIS_URL defaults to localhost in config.py — must be set as env var on Render before deploying Redis queue to production
 
 ## Tech Stack

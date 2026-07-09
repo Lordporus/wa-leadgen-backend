@@ -20,6 +20,7 @@ from config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
     FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, BLOCKED_NUMBERS,
     ADMIN_SECRET, MIGRATION_MODE, JWT_SECRET, REDIS_URL,
+    SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_TRACES_SAMPLE_RATE,
 )
 from whatsapp_client import WhatsAppClient
 from gemini_client import GeminiClient
@@ -36,6 +37,21 @@ import analytics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── Sentry APM ────────────────────────────────────────────────────────────
+# Initialize before the FastAPI app is created so the ASGI integration
+# instruments every request. No-op when SENTRY_DSN is unset (local dev).
+if SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        send_default_pii=False,
+    )
+    logger.info(f"Sentry APM initialized (env={SENTRY_ENVIRONMENT})")
+else:
+    logger.info("Sentry APM disabled (SENTRY_DSN not set)")
 
 whatsapp = WhatsAppClient()
 store = get_store()
@@ -333,11 +349,19 @@ def get_settings(request: Request, response: Response, client: Client = Depends(
 def update_settings(request: Request, response: Response, body: SettingsUpdateBody, client: Client = Depends(require_api_key)):
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
+
+    # Validate hex color before any DB work (mirrors POST /api/settings/branding).
+    if body.brand_color is not None and not _HEX_COLOR_RE.match(body.brand_color.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="brand_color must be a valid hex color, e.g. '#C8A96E' or '#FFF'",
+        )
+
     with SessionLocal() as s:
         db_client = s.query(Client).filter(Client.id == client.id).first()
         if not db_client:
             raise HTTPException(status_code=404, detail="Client not found")
-        
+
         if body.system_prompt is not None:
             db_client.system_prompt = body.system_prompt
         if body.calendly_link is not None:
@@ -345,7 +369,7 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
         if body.wa_phone_number_id is not None:
             db_client.wa_phone_number_id = body.wa_phone_number_id
         if body.brand_color is not None:
-            db_client.brand_color = body.brand_color
+            db_client.brand_color = body.brand_color.strip()
         if body.logo_url is not None:
             db_client.logo_url = body.logo_url
         if body.company_display_name is not None:
@@ -363,6 +387,28 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
         s.commit()
 
     return {"success": True}
+
+@app.get("/api/pipeline-stages")
+@limiter.limit("120/minute", key_func=get_client_key)
+def get_pipeline_stages(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """
+    Dedicated read endpoint for the tenant's ordered pipeline stages.
+
+    Frontend `useStages()` reads from here (previously it piggy-backed on
+    GET /api/settings). Same row shape as the `pipeline_stages` block that
+    /api/settings returns, ordered by position.
+    """
+    if not SessionLocal:
+        return {"pipeline_stages": []}
+    with SessionLocal() as s:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
+            return {"pipeline_stages": []}
+        stage_list = [
+            {"id": st.id, "name": st.name, "position": st.position, "is_won": st.is_won, "is_lost": st.is_lost}
+            for st in db_client.pipeline_stages
+        ]
+        return {"pipeline_stages": stage_list}
 
 # ── Sprint 9: White-label branding endpoints ───────────────────────────────
 
@@ -1436,10 +1482,13 @@ async def receive_message(request: Request, response: Response):
                         # Redis dedup: SETNX returns False if key already exists
                         if msg_id and redis_conn:
                             dedup_key = f"wamid:{msg_id}"
-                            if not redis_conn.setnx(dedup_key, 1):
-                                logger.info(f"Duplicate webhook deduped at Redis | wamid: {msg_id}")
-                                continue
-                            redis_conn.expire(dedup_key, 86400)
+                            try:
+                                if not redis_conn.setnx(dedup_key, 1):
+                                    logger.info(f"Duplicate webhook deduped at Redis | wamid: {msg_id}")
+                                    continue
+                                redis_conn.expire(dedup_key, 86400)
+                            except Exception as e:
+                                logger.warning(f"Redis unavailable, skipping dedup check: {e}")
 
                         # Enqueue for background processing
                         if webhook_queue:
