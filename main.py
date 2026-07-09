@@ -452,6 +452,8 @@ def admin_create_client(request: Request, response: Response, body: AdminCreateC
             dashboard_api_key_hash=key_hash,
             is_active=True,
             admin_note=body.admin_note,
+            plan_tier="base",
+            subscription_status="inactive",
         )
         s.add(new_client)
         s.flush()  # get the auto-generated id before seeding stages
@@ -487,6 +489,8 @@ def admin_create_client(request: Request, response: Response, body: AdminCreateC
         "dashboard_api_key": raw_api_key,
         "wa_phone_number_id": new_client.wa_phone_number_id,
         "pipeline_stages_seeded": len(default_stages),
+        "plan_tier": "base",
+        "subscription_status": "inactive",
     }
 
 
@@ -917,6 +921,24 @@ async def billing_webhook(request: Request, response: Response):
     return {"status": "ok", "result": result}
 
 
+@app.get("/api/billing/status", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/minute", key_func=get_client_key)
+def billing_status(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    """Return the client's current billing status and monthly usage summary."""
+    from usage import get_monthly_usage, PLAN_LIMITS, DEFAULT_PLAN
+
+    plan = client.plan_tier or "base"
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS[DEFAULT_PLAN])
+    usage = get_monthly_usage(client.id)
+
+    return {
+        "plan_tier": plan,
+        "subscription_status": client.subscription_status or "inactive",
+        "usage": usage,
+        "limits": limits,
+    }
+
+
 def verify_signature(payload: bytes, signature_header: str) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
     if not signature_header:
@@ -933,6 +955,33 @@ def verify_signature(payload: bytes, signature_header: str) -> bool:
 @limiter.limit("60/minute")
 def read_root(request: Request, response: Response):
     return {"status": "ok", "message": "WhatsApp Acquisition System is running."}
+
+
+@app.get("/health")
+@limiter.limit("60/minute")
+def health_check(request: Request, response: Response):
+    """Infrastructure health check — no auth required."""
+    db_ok = False
+    redis_ok = False
+
+    if SessionLocal:
+        try:
+            with SessionLocal() as s:
+                s.execute(text("SELECT 1"))
+            db_ok = True
+        except Exception:
+            pass
+
+    if redis_conn:
+        try:
+            redis_conn.ping()
+            redis_ok = True
+        except Exception:
+            pass
+
+    status = "ok" if db_ok else "degraded"
+    return {"status": status, "db": db_ok, "redis": redis_ok}
+
 
 @app.get("/webhook")
 @limiter.limit("10/minute")

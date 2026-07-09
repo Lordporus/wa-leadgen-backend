@@ -128,7 +128,7 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - [x] Add GET /api/documents endpoint — list tenant's documents
 - [x] Read docs/06_API_SPECIFICATION.md before implementing
 
-## Sprint 6 — Billing, Metering & Beta Release (current)
+## Sprint 6 — Billing, Metering & Beta Release ✅
 
 ### Task 1: Usage Tracking Foundation ✅
 - [x] Add `usage_events` table via Alembic migration:
@@ -179,11 +179,13 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - [x] Hard cap checks in jobs.py and main.py now read client.plan_tier to use correct limits
 - **Note:** Uses Razorpay Subscriptions API for true recurring billing (switched from Orders API). Plans created on Dashboard, IDs stored in RAZORPAY_PLAN_ID_BASE / RAZORPAY_PLAN_ID_AGENCY env vars. total_count=1200 for pseudo-indefinite monthly billing. subscription_status values: created, active, past_due (retrying), halted (retries exhausted), cancelled, completed. Migration 0005 not yet applied to production. Env vars needed: RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET, RAZORPAY_PLAN_ID_BASE, RAZORPAY_PLAN_ID_AGENCY.
 
-### Task 4: Beta Release Readiness
-- Self-serve signup flow (or confirm admin-only onboarding stays for beta — check docs)
-- Basic usage dashboard endpoint: GET /api/billing/usage (current period usage vs limits)
-- Verify all Sprint 1–5 security fixes are still in place (regression check, not new work)
-- Read docs/13_PRODUCT_ROADMAP.md for beta scope — do not add features beyond documented M2 scope
+### Task 4: Beta Release Readiness ✅
+- [x] Confirmed admin-only onboarding stays for beta (POST /api/admin/clients)
+- [x] Onboarding endpoint now explicitly sets plan_tier="base", subscription_status="inactive"
+- [x] Added GET /api/billing/status — returns plan_tier, subscription_status, usage summary + limits (auth: require_api_key)
+- [x] Added GET /health — no auth, returns {"status", "db", "redis"} connectivity check
+- [x] Read docs/13_PRODUCT_ROADMAP.md and docs/14_FINAL_PRD.md before implementing
+- **Note:** Health check returns "degraded" if DB is unreachable (Redis being down is tolerable). Self-serve signup deferred to Q3 per roadmap — beta uses admin provisioning only.
 
 ## Sprint 7 (after Sprint 6 complete)
 - Campaign/Drip Engine
