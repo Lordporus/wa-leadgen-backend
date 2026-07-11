@@ -1490,6 +1490,22 @@ async def receive_message(request: Request, response: Response, background_tasks
                             except Exception as e:
                                 logger.warning(f"Redis unavailable, skipping dedup check: {e}")
 
+                        # DB-level dedup fallback when Redis unavailable
+                        if msg_id:
+                            try:
+                                from database import SessionLocal
+                                from models import Message
+                                from sqlalchemy import select
+                                with SessionLocal() as session:
+                                    existing = session.execute(
+                                        select(Message).where(Message.wa_message_id == msg_id)
+                                    ).scalar_one_or_none()
+                                    if existing:
+                                        logger.info(f"Duplicate webhook deduped at DB | wamid: {msg_id}")
+                                        continue
+                            except Exception as db_err:
+                                logger.warning(f"DB dedup check failed: {db_err}")
+
                         # Enqueue for background processing
                         from jobs import process_webhook_message
                         if webhook_queue is not None:
