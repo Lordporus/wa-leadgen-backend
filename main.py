@@ -1513,35 +1513,14 @@ async def receive_message(request: Request, response: Response, background_tasks
                             except Exception as db_err:
                                 logger.warning(f"DB dedup check failed: {db_err}")
 
-                        # Enqueue for background processing
+                        # Use BackgroundTasks directly instead of RQ (since no worker is deployed yet)
                         from jobs import process_webhook_message
-                        if webhook_queue is not None:
-                            try:
-                                webhook_queue.enqueue(
-                                    process_webhook_message,
-                                    phone_number_id=phone_number_id,
-                                    message_data=message,
-                                )
-                            except Exception as e:
-                                logger.warning(f"Redis queue unavailable, falling back to background task: {e}")
-                                background_tasks.add_task(process_webhook_message, phone_number_id=phone_number_id, message_data=message)
-                        else:
-                            background_tasks.add_task(process_webhook_message, phone_number_id=phone_number_id, message_data=message)
+                        background_tasks.add_task(process_webhook_message, phone_number_id=phone_number_id, message_data=message)
 
                 if "statuses" in value:
                     for status in value["statuses"]:
                         from jobs import process_status_update
-                        if webhook_queue is not None:
-                            try:
-                                webhook_queue.enqueue(
-                                    process_status_update,
-                                    status_data=status,
-                                )
-                            except Exception as e:
-                                logger.warning(f"Redis queue unavailable, falling back to background task: {e}")
-                                background_tasks.add_task(process_status_update, status_data=status)
-                        else:
-                            background_tasks.add_task(process_status_update, status_data=status)
+                        background_tasks.add_task(process_status_update, status_data=status)
 
         return {"status": "queued"}
     return {"status": "ignored"}
