@@ -769,35 +769,30 @@ def _format_lead_row(record: dict) -> dict:
 @app.get("/api/stats/dashboard")
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_dashboard_stats(request: Request, response: Response, client: Client = Depends(require_api_key)):
-    """Aggregate lead counts and 7-day weekly activity from Airtable."""
-    try:
-        records = store.get_all_leads(client_id=client.id)
-    except Exception:
-        raise HTTPException(status_code=503, detail="data source unavailable")
+    """Aggregate lead counts and 7-day weekly activity from Postgres."""
+    with SessionLocal() as s:
+        total = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id"), {"client_id": client.id}).scalar() or 0
+        booked = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id AND status = 'Booked'"), {"client_id": client.id}).scalar() or 0
+        lost = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id AND status = 'Lost'"), {"client_id": client.id}).scalar() or 0
 
-    total = booked = lost = 0
-    weekly: dict[str, dict] = {}
+        weekly: dict[str, dict] = {}
+        now = datetime.now()
+        for i in range(7):
+            day = (now - timedelta(days=6 - i)).strftime("%a")
+            weekly[day] = {"day": day, "newLeads": 0, "booked": 0}
 
-    now = datetime.now()
-    for i in range(7):
-        day = (now - timedelta(days=6 - i)).strftime("%a")  # Mon, Tue …
-        weekly[day] = {"day": day, "newLeads": 0, "booked": 0}
+        recent = s.execute(text("""
+            SELECT created_at, status FROM leads 
+            WHERE client_id = :client_id AND created_at >= CURRENT_DATE - INTERVAL '7 days'
+        """), {"client_id": client.id}).fetchall()
 
-    for rec in records:
-        fields = rec.get("fields", {})
-        status = fields.get("Status", "")
-        total += 1
-        if status == "Booked":  booked += 1
-        if status == "Lost":    lost   += 1
-
-        raw_created = fields.get("Created_At", "")
-        created_dt = _parse_created_at(raw_created)
-        if created_dt and (now - created_dt).days < 7:
-            day_key = created_dt.strftime("%a")
-            if day_key in weekly:
-                weekly[day_key]["newLeads"] += 1
-                if status == "Booked":
-                    weekly[day_key]["booked"] += 1
+        for r in recent:
+            if r.created_at:
+                day_key = r.created_at.strftime("%a")
+                if day_key in weekly:
+                    weekly[day_key]["newLeads"] += 1
+                    if r.status == "Booked":
+                        weekly[day_key]["booked"] += 1
 
     conversion_rate = round((booked / total * 100)) if total else 0
 
