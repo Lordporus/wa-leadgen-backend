@@ -83,9 +83,15 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
             logger.info(f"Ignored blocked number: {sender_phone}")
             return
 
+        # Try to extract WhatsApp profile name if available (default to Unknown)
+        profile_name = message_data.get("profile_name", "Unknown")
+        if "contacts" in message_data and isinstance(message_data["contacts"], list) and len(message_data["contacts"]) > 0:
+            profile = message_data["contacts"][0].get("profile", {})
+            profile_name = profile.get("name", profile_name)
+
         logger.info(f"New unknown number {sender_phone} — creating lead automatically.")
         new_record = store.add_lead(
-            name="Unknown",
+            name=profile_name,
             phone=sender_phone,
             source="Inbound WhatsApp",
         )
