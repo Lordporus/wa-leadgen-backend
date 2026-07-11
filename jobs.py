@@ -42,6 +42,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
             req_gemini = tenant.get_gemini_for_client(fallback_client)
             req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
             req_lost_stages = tenant.get_lost_stage_names(CLIENT_ID)
+            current_client_id = CLIENT_ID
         else:
             logger.warning(f"Unknown phone_number_id: {phone_number_id}")
             return
@@ -49,6 +50,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
         req_gemini = ctx.gemini
         req_won_stages = ctx.won_stages
         req_lost_stages = ctx.lost_stages
+        current_client_id = ctx.client.id
 
     sender_phone = message_data.get("from")
     message_type = message_data.get("type")
@@ -71,7 +73,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     logger.info(f"[RQ] Processing message from {sender_phone}: {user_text}")
 
     # ── 3. Get or create lead ────────────────────────────────────────────
-    lead = store.get_lead(sender_phone)
+    lead = store.get_lead(sender_phone, client_id=current_client_id)
     if not lead:
         if sender_phone and sender_phone.lstrip('+').startswith('1555'):
             logger.info(f"Ignored Meta test number: {sender_phone}")
@@ -94,6 +96,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
             name=profile_name,
             phone=sender_phone,
             source="Inbound WhatsApp",
+            client_id=current_client_id,
         )
         if not new_record:
             logger.error(f"Failed to create lead for {sender_phone}. Dropping message.")
@@ -104,7 +107,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     # ── 4. Persistent idempotency (append inbound message) ───────────────
     appended = store.append_message(
         sender_phone, direction="inbound", message=user_text,
-        msg_type="text", wa_message_id=msg_id,
+        msg_type="text", wa_message_id=msg_id, client_id=current_client_id,
     )
     if not appended:
         logger.info(f"Duplicate webhook skipped | wamid: {msg_id} | phone: {sender_phone}")
@@ -112,7 +115,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
 
     current_status = lead.get("fields", {}).get("Status", "New Lead")
     if current_status == "New Lead":
-        store.update_lead_status(sender_phone, "Contacted")
+        store.update_lead_status(sender_phone, "Contacted", client_id=current_client_id)
 
     # ── 4b. Human takeover gate ──────────────────────────────────────────
     if lead.get("fields", {}).get("is_human_takeover"):
@@ -121,16 +124,15 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
         return
 
     # ── 4b2. Usage hard cap check ───────────────────────────────────────
-    client_id = lead.get("fields", {}).get("client_id")
-    if client_id:
+    if current_client_id:
         plan = "base"
         with SessionLocal() as session:
             db_client = session.get(Client, int(client_id))
             if db_client and db_client.plan_tier:
                 plan = db_client.plan_tier
-        allowed, reason = check_limit(client_id, "ai_response", plan=plan)
+        allowed, reason = check_limit(current_client_id, "ai_response", plan=plan)
         if not allowed:
-            logger.warning(f"AI cap hit for client {client_id}, lead {sender_phone}: {reason}")
+            logger.warning(f"AI cap hit for client {current_client_id}, lead {sender_phone}: {reason}")
             lead_id_int = int(lead.get("id", 0))
             with SessionLocal() as session:
                 db_lead = session.get(Lead, lead_id_int)
@@ -146,7 +148,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
         wamid = whatsapp.send_message(sender_phone, refusal)
         store.append_message(
             sender_phone, direction="outbound", message=refusal,
-            msg_type="text", wa_message_id=wamid,
+            msg_type="text", wa_message_id=wamid, client_id=current_client_id,
         )
         return
 
@@ -154,9 +156,8 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
 
     # ── 4d. RAG context retrieval ────────────────────────────────────────
     rag_context = ""
-    client_id = lead.get("fields", {}).get("client_id")
-    if client_id:
-        rag_chunks = retrieve_context(client_id, llm_text)
+    if current_client_id:
+        rag_chunks = retrieve_context(current_client_id, llm_text)
         if rag_chunks:
             rag_context = "\n\n---\nKNOWLEDGE BASE (use this to answer the customer):\n"
             rag_context += "\n---\n".join(rag_chunks)
@@ -204,40 +205,40 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     wamid = whatsapp.send_message(sender_phone, ai_reply)
     store.append_message(
         sender_phone, direction="outbound", message=ai_reply,
-        msg_type="text", wa_message_id=wamid,
+        msg_type="text", wa_message_id=wamid, client_id=current_client_id,
     )
 
     updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
 
     # ── 6b. Log AI usage ────────────────────────────────────────────────
-    if client_id:
+    if current_client_id:
         input_tokens = estimate_tokens(llm_text)
         output_tokens = estimate_tokens(ai_reply)
         total_tokens = input_tokens + output_tokens
         cost = (input_tokens / 1000) * COST_PER_1K_INPUT_TOKENS + (output_tokens / 1000) * COST_PER_1K_OUTPUT_TOKENS
-        log_usage(client_id, "ai_response", total_tokens, round(cost, 6))
+        log_usage(current_client_id, "ai_response", total_tokens, round(cost, 6))
 
     # ── 7. Analytics & extraction (inline — already off the HTTP path) ───
     lead_name = lead.get("fields", {}).get("Name", "Unknown") if isinstance(lead, dict) else lead.business_name
 
     _run_analytics(
         store, sender_phone, updated_last_message, user_text,
-        lead_name, req_gemini, req_won_stages, req_lost_stages,
+        lead_name, req_gemini, req_won_stages, req_lost_stages, current_client_id,
     )
 
 
-def process_status_update(status_data: dict):
+def process_status_update(status_data: dict, current_client_id: int = None):
     """Process a WhatsApp message status update (delivered/read)."""
     store = get_store()
     wamid = status_data["id"]
     status_str = status_data["status"]
     logger.info(f"[RQ] Message {wamid} status: {status_str}")
-    store.update_message_status(wamid, status_str)
+    store.update_message_status(wamid, status_str, client_id=current_client_id)
 
 
 def _run_analytics(
     store, sender_phone, updated_last_message, user_text,
-    lead_name, req_gemini, req_won_stages, req_lost_stages,
+    lead_name, req_gemini, req_won_stages, req_lost_stages, current_client_id,
 ):
     """
     Lead scoring, info extraction, status updates, lord notification.
@@ -248,7 +249,7 @@ def _run_analytics(
 
     try:
         score = req_gemini.score_lead(updated_last_message)
-        store.update_lead_score(sender_phone, score)
+        store.update_lead_score(sender_phone, score, client_id=current_client_id)
     except Exception as e:
         logger.error(f"Lead scoring failed: {e}")
 
@@ -259,18 +260,19 @@ def _run_analytics(
                 sender_phone,
                 name=info.get("Name"),
                 business_name=info.get("Business_Name"),
+                client_id=current_client_id,
             )
     except Exception as e:
         logger.error(f"Lead info extraction failed: {e}")
 
     try:
         if score in req_won_stages:
-            store.update_lead_status(sender_phone, "Qualified")
+            store.update_lead_status(sender_phone, "Qualified", client_id=current_client_id)
         elif score == "Cold":
             decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
             if any(word in user_text.lower() for word in decline_keywords):
                 lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                store.update_lead_status(sender_phone, lost_stage)
+                store.update_lead_status(sender_phone, lost_stage, client_id=current_client_id)
                 logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
     except Exception as e:
         logger.error(f"Status update failed: {e}")
@@ -280,7 +282,7 @@ def _run_analytics(
             lord_phone = LORD_PHONE_NUMBER
             if lord_phone:
                 norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
-                if store.get_lead(norm_lord):
+                if store.get_lead(norm_lord, client_id=current_client_id):
                     logger.error(
                         f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an "
                         f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
