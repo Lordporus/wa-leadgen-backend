@@ -58,7 +58,13 @@ store = get_store()
 calendly = CalendlyClient()
 
 # ── Redis queue for webhook jobs ─────────────────────────────────────────
-redis_conn = Redis.from_url(REDIS_URL) if REDIS_URL else None
+redis_conn = Redis.from_url(
+    REDIS_URL,
+    socket_timeout=2,
+    socket_connect_timeout=2,
+    retry_on_timeout=True,
+    health_check_interval=30,
+) if REDIS_URL else None
 webhook_queue = RQQueue("webhooks", connection=redis_conn) if redis_conn else None
 
 # ── Pydantic request bodies ───────────────────────────────────────────────
@@ -1481,8 +1487,9 @@ async def receive_message(request: Request, response: Response, background_tasks
 
                         # Redis dedup: SETNX returns False if key already exists
                         if msg_id and redis_conn:
-                            dedup_key = f"wamid:{msg_id}"
                             try:
+                                redis_conn.ping()  # verify connection is alive
+                                dedup_key = f"wamid:{msg_id}"
                                 if not redis_conn.setnx(dedup_key, 1):
                                     logger.info(f"Duplicate webhook deduped at Redis | wamid: {msg_id}")
                                     continue
