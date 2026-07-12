@@ -54,6 +54,12 @@ class Client(Base):
     logo_url:             Mapped[str | None] = mapped_column(String(500), nullable=True)
     company_display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # ── AI scoring config ──────────────────────────────────────────────────────
+    # Stored as an integer 0-100. Default 70 matches the hardcoded
+    # CONFIDENCE_THRESHOLD in guardrails.py. NOT wired into scoring logic
+    # yet — this field only persists the setting. Integration is a separate task.
+    hot_lead_threshold: Mapped[int] = mapped_column(Integer, default=70, server_default="70", nullable=False)
+
     # ── F6b: multi-tenant scheduler jobs ──────────────────────────────────
     admin_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # TODO: Before actively using this field for per-client API calls,

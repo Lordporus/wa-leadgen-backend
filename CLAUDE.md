@@ -7,9 +7,9 @@ You are the senior engineering partner for AI Sales OS. This is a production B2B
 All 16 documents in the /docs folder are the authoritative specification. Read them before implementing anything.
 
 ## Current State
-- Audit complete: PROJECT_BASELINE_AUDIT.md in project root
-- Sprint 1 in progress: Security fixes
-- Tasks completed: Debug endpoints removed, HMAC mandatory, WhatsAppClient singleton bug fixed
+- All 10 sprints complete
+- M3 Agency Beta ready
+- Known gaps documented in PRODUCTION_READY.md
 
 ## Rules
 1. Never implement multiple unrelated things in one task
@@ -283,7 +283,7 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - **Note — dynamic stages:** ⚠️ `GET /api/pipeline-stages` does NOT exist in the backend (verified: only stage source is `GET /api/settings` → `pipeline_stages:[{id,name,position,is_won,is_lost}]`). Built `useStages()` hook that reads from `/api/settings`, sorts by `position`, returns names; falls back to DEFAULT_STAGES `[New Lead, Contacted, Qualified, Booked, Lost]` before load / when tenant has none (Airtable/503 mode returns []). Wired into: leads filter chips, KanbanBoard columns (grid now `repeat(N,1fr)` not hardcoded 5), LeadProfileSidebar stage `<select>` (+ safety `<option>` so a lead's current stage stays selectable even if renamed out of config). Left color-only lookups (`utils.ts STAGE_COLORS`, analytics `STAGE_ORDER`, donut) as-is — they degrade to gold fallback for custom names and rewiring risks chart breakage; not interactive stage lists. If a dedicated `/api/pipeline-stages` route is added later, only `useStages.ts` changes.
 - **Note — empty states:** Leads page → NEW `LeadsEmptyState` ("No leads yet" + WhatsApp hint; filter-aware variant "No leads in '{stage}'"). Conversations page → ALREADY had a polished "No conversations yet" empty state (unchanged). Documents ("no docs") → ⚠️ NO documents page exists in the frontend (nav is Dashboard/Leads/Conversations/Pipeline/Analytics/Settings; backend `GET /api/documents` exists but has no UI). Nothing to add an empty state to — a Documents page is net-new UI, out of scope for a polish task. Flagged for a future sprint.
 
-## Sprint 10 — Production Hardening & M3 Release (current)
+## Sprint 10 — Production Hardening & M3 Release ✅
 
 ### Task 1: Sentry APM Integration ✅
 - [x] Install sentry-sdk in requirements.txt
@@ -313,13 +313,13 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - **Note — item 2 (Documents page):** NEW `frontend/src/app/(dashboard)/documents/page.tsx` (route `/documents`). Lists docs from `GET /api/documents` (`[{filename,chunks,uploaded_at}]`); upload button → multipart `POST /api/documents/upload` via raw `fetch`+FormData (NOT apiFetch — that forces JSON content-type; browser must set the multipart boundary itself). States: loading skeletons, empty ("No documents uploaded yet"), inline upload error (parses backend `detail`), success → SWR `mutate()` refetch. Input `accept=".pdf,.txt"`, resets after pick so same file re-triggers. Nav entry + topbar title + IconFileText added to `(dashboard)/layout.tsx`. Resolves the "Documents page missing" debt entry. `tsc --noEmit` + `next lint` clean.
 - **Note — item 3 (hex on PATCH):** `/api/settings` PATCH now validates `brand_color` against the same `_HEX_COLOR_RE` used by POST /api/settings/branding, BEFORE any DB write → 400 on invalid; value is `.strip()`ed before persist. Closes the gap where the legacy PATCH path could store an unvalidated color that the dedicated branding endpoint would reject.
 
-### Task 4: Production Readiness Checklist
-- Verify all items in PROJECT_BASELINE_AUDIT.md production blockers are resolved
-- Generate a PRODUCTION_READY.md report:
+### Task 4: Production Readiness Checklist ✅
+- [x] Verify all items in PROJECT_BASELINE_AUDIT.md production blockers are resolved
+- [x] Generate a PRODUCTION_READY.md report:
   - What was fixed (Sprint 1-10)
   - What is still pending
   - Deployment checklist for M3 Agency Beta release
-- Read PROJECT_BASELINE_AUDIT.md before implementing
+- [x] Read PROJECT_BASELINE_AUDIT.md before implementing
 
 ## Post Sprint 10
 - Multi-Channel: Voice AI, Cold Email (Sprint 11-16)

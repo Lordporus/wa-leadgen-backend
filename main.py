@@ -86,6 +86,7 @@ class SettingsUpdateBody(BaseModel):
     brand_color: str | None = None
     logo_url: str | None = None
     company_display_name: str | None = None
+    hot_lead_threshold: int | None = None
 
 class AdminCreateClientBody(BaseModel):
     name: str
@@ -332,11 +333,11 @@ def login(request: Request, response: Response, body: LoginBody):
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_settings(request: Request, response: Response, client: Client = Depends(require_api_key)):
     if not SessionLocal:
-        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM"}
+        return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM", "hot_lead_threshold": 70}
     with SessionLocal() as s:
         db_client = s.query(Client).filter(Client.id == client.id).first()
         if not db_client:
-            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM"}
+            return {"system_prompt": "", "calendly_link": "", "wa_phone_number_id": "", "pipeline_stages": [], "brand_color": "#C8A96E", "logo_url": "", "company_display_name": "Leadgen CRM", "hot_lead_threshold": 70}
 
         stage_list = [{"id": st.id, "name": st.name, "position": st.position, "is_won": st.is_won, "is_lost": st.is_lost} for st in db_client.pipeline_stages]
 
@@ -348,6 +349,7 @@ def get_settings(request: Request, response: Response, client: Client = Depends(
             "brand_color": db_client.brand_color or "#10B981",
             "logo_url": db_client.logo_url or "",
             "company_display_name": db_client.company_display_name or db_client.name or "Leadgen CRM",
+            "hot_lead_threshold": db_client.hot_lead_threshold if db_client.hot_lead_threshold is not None else 70,
         }
 
 @app.patch("/api/settings")
@@ -361,6 +363,13 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
         raise HTTPException(
             status_code=400,
             detail="brand_color must be a valid hex color, e.g. '#C8A96E' or '#FFF'",
+        )
+
+    # Validate threshold is within 0-100.
+    if body.hot_lead_threshold is not None and not (0 <= body.hot_lead_threshold <= 100):
+        raise HTTPException(
+            status_code=400,
+            detail="hot_lead_threshold must be an integer between 0 and 100",
         )
 
     with SessionLocal() as s:
@@ -380,7 +389,9 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
             db_client.logo_url = body.logo_url
         if body.company_display_name is not None:
             db_client.company_display_name = body.company_display_name
-            
+        if body.hot_lead_threshold is not None:
+            db_client.hot_lead_threshold = body.hot_lead_threshold
+
         if body.pipeline_stages is not None:
             stage_map = {st.id: st for st in db_client.pipeline_stages}
             for stage_update in body.pipeline_stages:
@@ -389,7 +400,7 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
                     stage.name = stage_update.name
                     stage.is_won = stage_update.is_won
                     stage.is_lost = stage_update.is_lost
-        
+
         s.commit()
 
     return {"success": True}
