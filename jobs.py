@@ -7,6 +7,7 @@ then returns 200 immediately to ACK Meta.
 """
 
 import logging
+from datetime import datetime
 
 from config import (
     LORD_PHONE_NUMBER, BLOCKED_NUMBERS, MIGRATION_MODE, CLIENT_ID,
@@ -242,17 +243,7 @@ def _run_analytics(
 ):
     """
     Lead scoring, info extraction, status updates, lord notification.
-    Mirrors _process_analytics_and_extraction_bg from main.py but runs
-    inline inside the RQ worker (already off the HTTP hot path).
     """
-    score = None
-
-    try:
-        score = req_gemini.score_lead(updated_last_message)
-        store.update_lead_score(sender_phone, score, client_id=current_client_id)
-    except Exception as e:
-        logger.error(f"Lead scoring failed: {e}")
-
     try:
         info = req_gemini.extract_lead_info(updated_last_message)
         if info:
@@ -266,30 +257,54 @@ def _run_analytics(
         logger.error(f"Lead info extraction failed: {e}")
 
     try:
-        if score in req_won_stages:
-            store.update_lead_status(sender_phone, "Qualified", client_id=current_client_id)
-        elif score == "Cold":
-            decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
-            if any(word in user_text.lower() for word in decline_keywords):
-                lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                store.update_lead_status(sender_phone, lost_stage, client_id=current_client_id)
-                logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
-    except Exception as e:
-        logger.error(f"Status update failed: {e}")
-
-    try:
-        if score in req_won_stages:
-            lord_phone = LORD_PHONE_NUMBER
-            if lord_phone:
-                norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
-                if store.get_lead(norm_lord, client_id=current_client_id):
-                    logger.error(
-                        f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an "
-                        f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
-                    )
+        score_data = req_gemini.score_lead(updated_last_message)
+        numeric_score = score_data.get("score", 0)
+        
+        # Calculate derived string score based on threshold
+        with SessionLocal() as session:
+            client = session.query(Client).filter(Client.id == current_client_id).first()
+            lead = session.query(Lead).filter(Lead.phone == sender_phone, Lead.client_id == current_client_id).first()
+            
+            if client and lead:
+                threshold = client.hot_lead_threshold
+                if numeric_score >= threshold:
+                    string_score = "Hot"
+                elif numeric_score >= (threshold * 0.5):
+                    string_score = "Warm"
                 else:
-                    whatsapp.send_message(lord_phone, f"🔥 HOT LEAD ALERT: Check Airtable for {lead_name} ({sender_phone})")
-            else:
-                logger.info(f"🔥 HOT LEAD: {lead_name} {sender_phone}")
+                    string_score = "Cold"
+                
+                # Save to database
+                lead.lead_score_numeric = numeric_score
+                lead.lead_score = string_score
+                
+                # Check for alert
+                if string_score == "Hot" and not lead.notified_hot_at:
+                    lord_phone = LORD_PHONE_NUMBER
+                    if lord_phone:
+                        norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
+                        if store.get_lead(norm_lord, client_id=current_client_id):
+                            logger.error(f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an existing lead record.")
+                        else:
+                            whatsapp.send_message(
+                                lord_phone, 
+                                f"🔥 HOT LEAD ALERT: Check dashboard for {lead_name} ({sender_phone})\nScore: {numeric_score}/{threshold}\nSignals: {score_data.get('summary', '')}"
+                            )
+                            lead.notified_hot_at = datetime.utcnow()
+                    else:
+                        logger.info(f"🔥 HOT LEAD: {lead_name} {sender_phone} (Score: {numeric_score})")
+                        lead.notified_hot_at = datetime.utcnow()
+
+                session.commit()
+                
+                # Explicit decline logic
+                if string_score == "Cold":
+                    decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
+                    if any(word in user_text.lower() for word in decline_keywords):
+                        lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
+                        lead.status = lost_stage
+                        session.commit()
+                        logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
+
     except Exception as e:
-        logger.error(f"Lord notification failed: {e}")
+        logger.error(f"Analytics/Scoring process failed: {e}")

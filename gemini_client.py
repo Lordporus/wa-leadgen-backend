@@ -183,23 +183,40 @@ class GeminiClient:
             logger.error(f"Extraction error: {e}")
             return {}
 
-    def score_lead(self, conversation_text: str) -> str:
+    def score_lead(self, conversation_text: str) -> dict:
         prompt = f"""
-        Analyze the following conversation history between an AI sales assistant and a dentist.
-        Score the lead as "Cold", "Warm", or "Hot" based on the signals for NEED, AUTHORITY, BUDGET FIT, and TIMELINE.
-        - Hot: Clearly interested, ready to book a call, confirmed budget fit or strong need.
-        - Warm: Engaged, asking questions, somewhat interested but hasn't committed to a call.
-        - Cold: Not interested, dismissive, or completely unresponsive to the value proposition.
-        
-        Return ONLY the word "Cold", "Warm", or "Hot".
+        Analyze the following conversation history between an AI sales assistant and a prospect (Real Estate or Coaching).
+        Extract whether the prospect has provided the following signals:
+        - has_budget (boolean): Did the lead mention a budget, price range, or willingness to pay?
+        - has_timeline (boolean): Did the lead mention when they want to start, move, or buy (e.g. "next month", "ASAP")?
+        - has_specific_interest (boolean): Did they mention a specific location, property type, or specific coaching goal?
+        - is_responsive (boolean): Are they actively answering questions and engaging?
+
+        Return ONLY a JSON dictionary with the boolean keys above, plus a string key "matched_signals_summary" explaining briefly.
         
         Conversation:
         {conversation_text}
         """
 
-        def _clean_score(raw: str) -> str:
-            score = raw.strip().replace('"', '').replace('.', '').capitalize()
-            return score if score in ["Cold", "Warm", "Hot"] else "Cold"
+        def _calculate_score(raw: str) -> dict:
+            import json
+            try:
+                content = raw.strip().replace("```json", "").replace("```", "").strip()
+                data = json.loads(content)
+            except Exception as e:
+                logger.error(f"Score JSON parse failed: {e}, raw: {raw}")
+                data = {"has_budget": False, "has_timeline": False, "has_specific_interest": False, "is_responsive": False, "matched_signals_summary": "Parsing error"}
+            
+            score = 0
+            if data.get("is_responsive"): score += 20
+            if data.get("has_specific_interest"): score += 30
+            if data.get("has_timeline"): score += 25
+            if data.get("has_budget"): score += 25
+            
+            return {
+                "score": score,
+                "summary": data.get("matched_signals_summary", "")
+            }
 
         # ── Primary: 9Router ──
         if _router_client:
@@ -209,14 +226,14 @@ class GeminiClient:
                     messages=[{"role": "user", "content": prompt}],
                 )
                 logger.info(f"9Router score OK — model_used={resp.model}")
-                return _clean_score(resp.choices[0].message.content)
+                return _calculate_score(resp.choices[0].message.content)
             except Exception as e:
                 logger.warning(f"9Router score failed ({e}), falling back to direct Gemini")
 
         # ── Fallback: direct Gemini SDK ──
         try:
             response = self._fallback_model.generate_content(prompt)
-            return _clean_score(response.text)
+            return _calculate_score(response.text)
         except Exception as e:
             logger.error(f"Scoring error: {e}")
-            return "Cold"
+            return {"score": 0, "summary": "Error"}

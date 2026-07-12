@@ -29,3 +29,10 @@ run_*.py
 # Build artefacts / local-only docs
 *.html
 v2_upgrade.md
+
+codebase-memory-mcp.exe
+codebase-memory-mcp.zip
+install.ps1
+LICENSE
+THIRD_PARTY_NOTICES.md
+.cgcignore

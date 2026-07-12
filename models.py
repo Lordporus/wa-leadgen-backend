@@ -106,6 +106,8 @@ class Lead(Base):
     status: Mapped[str] = mapped_column(String(50), default="New Lead", index=True)
     business_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lead_score: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    lead_score_numeric: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notified_hot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_human_takeover: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     client_id: Mapped[int] = mapped_column(
         ForeignKey("clients.id"), default=1, nullable=False
