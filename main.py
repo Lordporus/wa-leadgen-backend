@@ -1042,24 +1042,27 @@ class SendMessageBody(BaseModel):
 @limiter.limit("60/minute", key_func=get_client_key)
 def send_human_message(request: Request, response: Response, lead_id: int, body: SendMessageBody, client: Client = Depends(require_api_key)):
     """Send a manual WhatsApp message to the lead."""
-    from store import get_primary_store
-    store = get_primary_store()
+    from db_client import PHONE_KEY
     
     lead = store.get_lead_by_id(lead_id, client.id)
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
         
-    wa_client = WhatsAppClient()
+    phone = lead.get("fields", {}).get(PHONE_KEY)
+    if not phone:
+        logger.error(f"Lead {lead_id} has no phone number on file.")
+        raise HTTPException(status_code=400, detail="Lead has no phone number on file")
+        
     try:
-        wa_client.send_message(lead["phone"], body.message)
+        whatsapp.send_message(phone, body.message)
     except Exception as e:
-        logger.error(f"Failed to send manual message: {e}")
+        logger.error("Failed to send manual message", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to send WhatsApp message")
         
-    store.save_message(
-        lead_id=lead_id,
+    store.append_message(
+        phone=phone,
         direction="OUTBOUND",
-        body=body.message,
+        message=body.message,
         msg_type="human",
     )
     return {"success": True}
