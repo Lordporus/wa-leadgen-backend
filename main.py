@@ -1035,6 +1035,36 @@ def release_lead(request: Request, response: Response, lead_id: int, client: Cli
         s.commit()
     return {"success": True, "lead_id": lead_id, "is_human_takeover": False}
 
+class SendMessageBody(BaseModel):
+    message: str
+
+@app.post("/api/leads/{lead_id}/send-message", dependencies=[Depends(require_api_key)])
+@limiter.limit("60/minute", key_func=get_client_key)
+def send_human_message(request: Request, response: Response, lead_id: int, body: SendMessageBody, client: Client = Depends(require_api_key)):
+    """Send a manual WhatsApp message to the lead."""
+    from store import get_primary_store
+    store = get_primary_store()
+    
+    lead = store.get_lead_by_id(lead_id, client.id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+        
+    wa_client = WhatsAppClient()
+    try:
+        wa_client.send_message(lead["phone"], body.message)
+    except Exception as e:
+        logger.error(f"Failed to send manual message: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send WhatsApp message")
+        
+    store.save_message(
+        lead_id=lead_id,
+        direction="OUTBOUND",
+        body=body.message,
+        msg_type="human",
+    )
+    return {"success": True}
+
+
 
 # ── Sprint 8: Agency sub-account endpoints ─────────────────────────────────
 
