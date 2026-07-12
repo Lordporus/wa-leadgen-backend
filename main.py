@@ -836,9 +836,13 @@ def list_leads(request: Request, response: Response, client: Client = Depends(re
 def get_lead_detail(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Return a single lead with full conversation history."""
     try:
-        record = store.get_lead_by_id(lead_id)
-    except Exception:
-        raise HTTPException(status_code=503, detail="data source unavailable")
+        parsed_id = int(lead_id) if lead_id.isdigit() else lead_id
+        record = store.get_lead_by_id(parsed_id, client_id=client.id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid lead ID format")
+    except Exception as e:
+        logger.error(f"Failed to fetch lead {lead_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -873,29 +877,50 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
         "messages":        _parse_messages(last_msg),
     }
 
-@app.get("/api/leads/{lead_id}/messages", dependencies=[Depends(require_api_key)])
+@app.get("/api/leads/{lead_id}/messages")
 @limiter.limit("120/minute", key_func=get_client_key)
-def get_lead_messages(request: Request, response: Response, lead_id: str):
-    """Return all messages for a lead from the Postgres Message table."""
+def get_lead_messages(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+    """Return all messages for a lead from Postgres.
+
+    NOTE: This endpoint intentionally bypasses the `store` abstraction and
+    queries Postgres directly. Reason: messages are *only* written to Postgres
+    (via db_client.append_message), regardless of MIGRATION_MODE. When
+    MIGRATION_MODE=dual, `store` routes reads to Airtable (the primary), which
+    has no per-message rows — routing through store.get_messages_for_lead()
+    would silently return [] and be a functional regression. Direct Postgres
+    query is the correct and intentional path here.
+    """
     try:
-        record = store.get_lead_by_id(lead_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Lead not found")
-            
-        phone = record.get("fields", {}).get("Phone number type")
-        if not phone:
-            return []
-            
+        # lead_id may arrive as a Postgres integer ID or an Airtable string ID.
+        try:
+            parsed_id = int(lead_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid lead ID — must be a numeric Postgres ID")
+
         if not SessionLocal:
+            # Postgres not configured; no messages can exist.
             return []
-            
+
         from models import Lead, Message
         with SessionLocal() as s:
-            lead = s.query(Lead).filter(Lead.phone == phone).first()
+            # Verify lead exists AND belongs to this tenant (client_id scoping).
+            # This is the only authz check needed — we don't go through store here.
+            lead = s.query(Lead).filter(
+                Lead.id == parsed_id,
+                Lead.client_id == client.id,
+            ).first()
+
             if not lead:
+                # Return [] rather than 404 — the frontend silently ignores an
+                # absent messages list, and SWR would log console errors on 404.
                 return []
-            
-            msgs = s.query(Message).filter(Message.lead_id == lead.id).order_by(Message.created_at).all()
+
+            msgs = (
+                s.query(Message)
+                .filter(Message.lead_id == lead.id)
+                .order_by(Message.created_at.asc())
+                .all()
+            )
             return [
                 {
                     "id": f"m{m.id}",
@@ -906,9 +931,11 @@ def get_lead_messages(request: Request, response: Response, lead_id: str):
                 }
                 for m in msgs
             ]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error fetching messages for lead {lead_id}: {e}")
-        return []
+        logger.error(f"Failed to fetch messages for lead {lead_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.patch("/api/leads/{lead_id}/stage", dependencies=[Depends(require_api_key)])
