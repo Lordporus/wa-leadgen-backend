@@ -127,7 +127,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     if current_client_id:
         plan = "base"
         with SessionLocal() as session:
-            db_client = session.get(Client, int(client_id))
+            db_client = session.get(Client, int(current_client_id))
             if db_client and db_client.plan_tier:
                 plan = db_client.plan_tier
         allowed, reason = check_limit(current_client_id, "ai_response", plan=plan)
