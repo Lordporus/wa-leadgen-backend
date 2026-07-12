@@ -498,6 +498,60 @@ def update_branding(request: Request, response: Response, body: BrandingUpdateBo
             "company_display_name": db_client.company_display_name or db_client.name or "Leadgen CRM",
         }
 
+# ── API key rotation ──────────────────────────────────────────────────────
+
+@app.post("/api/settings/regenerate-api-key")
+@limiter.limit("3/minute", key_func=get_client_key)
+def regenerate_api_key(
+    request: Request,
+    response: Response,
+    client: Client = Depends(require_api_key),
+):
+    """
+    Rotate the authenticated tenant's dashboard API key.
+
+    The caller is already authenticated via require_api_key (Bearer token in
+    the Authorization header), which is sufficient proof of key ownership —
+    no second factor is required for a beta product.
+
+    Key generation reuses the identical pattern used in onboard_client.py and
+    the admin /admin/create-client endpoint:
+        raw_key = secrets.token_hex(32)   # 256 bits of CSPRNG entropy
+        key_hash = sha256(raw_key)        # stored; never the raw value
+
+    The raw key is returned in the response body EXACTLY ONCE and is never
+    written to any log. After this call the old key is immediately invalid.
+    """
+    if not SessionLocal:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    # ── Generate new key (same CSPRNG pattern as onboard_client.py) ──────
+    new_raw_key = secrets.token_hex(32)
+    new_key_hash = hashlib.sha256(new_raw_key.encode("utf-8")).hexdigest()
+
+    with SessionLocal() as s:
+        db_client = s.query(Client).filter(Client.id == client.id).first()
+        if not db_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        db_client.dashboard_api_key_hash = new_key_hash
+        s.commit()
+
+    # Log the rotation event — client_id and timestamp only, never the key.
+    logger.info(
+        "API key rotated: client_id=%s at=%s",
+        client.id,
+        datetime.utcnow().isoformat(),
+    )
+
+    # Return the raw key once. The caller must copy it immediately.
+    return {
+        "success": True,
+        "api_key": new_raw_key,
+        "note": "Copy this key now — it will not be shown again.",
+    }
+
+
 # ── Template library endpoints ────────────────────────────────────────────
 
 @app.get("/api/templates", dependencies=[Depends(require_api_key)])
