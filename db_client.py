@@ -163,6 +163,48 @@ class DatabaseClient:
             logger.error(f"Postgres get_lead error: {e}")
             return None
 
+    def get_lead_by_id(self, lead_id: int, client_id: int) -> dict | None:
+        """Return the first record matching this ID within a tenant, or None."""
+        if not self.ok:
+            return None
+        try:
+            with self._session() as s:
+                row = s.execute(
+                    select(Lead).where(Lead.id == lead_id, Lead.client_id == client_id)
+                ).scalar_one_or_none()
+                return self._record(row) if row else None
+        except SQLAlchemyError as e:
+            logger.error(f"Postgres get_lead_by_id error: {e}")
+            return None
+
+    def get_messages_for_lead(self, lead_id: int, client_id: int) -> list[dict]:
+        """Fetch all messages for a lead, scoping by client_id for tenant isolation."""
+        if not self.ok:
+            return []
+        try:
+            with self._session() as s:
+                rows = s.execute(
+                    select(Message)
+                    .join(Lead, Message.lead_id == Lead.id)
+                    .where(Message.lead_id == lead_id, Lead.client_id == client_id)
+                    .order_by(Message.created_at.asc())
+                ).scalars().all()
+                return [
+                    {
+                        "id": r.id,
+                        "direction": r.direction,
+                        "body": r.body,
+                        "msg_type": r.msg_type,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                        "wa_message_id": r.wa_message_id,
+                        "status": r.status,
+                    }
+                    for r in rows
+                ]
+        except SQLAlchemyError as e:
+            logger.error(f"Postgres get_messages_for_lead error: {e}")
+            return []
+
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         """Return leads with status 'Contacted' for a specific client."""
         if not self.ok:
