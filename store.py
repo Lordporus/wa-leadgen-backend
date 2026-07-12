@@ -60,8 +60,15 @@ class DualWriteStore:
     def get_all_leads(self, client_id=None) -> list:
         return self._primary.get_all_leads(client_id=client_id)
 
-    def get_lead_by_id(self, record_id: str) -> dict | None:
-        return self._primary.get_lead_by_id(record_id)
+    def get_lead_by_id(self, record_id: str | int, client_id: int | None = None) -> dict | None:
+        return self._primary.get_lead_by_id(record_id, client_id=client_id)
+
+    def get_messages_for_lead(self, lead_id: str | int, client_id: int | None = None) -> list:
+        # Note: In DualWrite mode, reads still come from primary (Airtable), which doesn't support separate messages
+        # When MIGRATION_MODE=postgres, this class isn't used, and DatabaseClient is the store.
+        if hasattr(self._primary, "get_messages_for_lead"):
+            return self._primary.get_messages_for_lead(lead_id, client_id=client_id)
+        return []
 
     # ── writes (both; secondary failures contained) ───────────────────────
 

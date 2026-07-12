@@ -126,7 +126,7 @@ class AirtableClient:
         return self._search("{Status}='Contacted'")
 
 
-    def get_lead_by_id(self, record_id: str) -> dict | None:
+    def get_lead_by_id(self, record_id: str, client_id: int | None = None) -> dict | None:
         """Return a single record by its Airtable record ID."""
         if not self.ok:
             return None
@@ -141,6 +141,10 @@ class AirtableClient:
         except Exception as e:
             logger.error(f"Airtable get_by_id error: {e}")
             return None
+
+    def get_messages_for_lead(self, lead_id: str, client_id: int | None = None) -> list:
+        # Airtable doesn't store separate message rows. Messages are parsed from the Lead's Last_Message field.
+        return []
 
     def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
         """Append a message to the Last_Message long text field (used as MVP message log)."""
