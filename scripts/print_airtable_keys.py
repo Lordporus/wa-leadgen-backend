@@ -1,6 +1,10 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import asyncio
-from store import store
-from airtable_client import airtable_client
+from app.store.store import store
+from app.clients.airtable_client import airtable_client
 
 async def main():
     # fetch raw records

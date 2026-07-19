@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 #!/usr/bin/env python3
 """
 Item #6 — Onboarding CLI.
@@ -21,9 +25,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from config import DATABASE_URL
-from database import init_engine, SessionLocal
-from models import Client, PipelineStage, PromptTemplate
+from app.core.config import DATABASE_URL
+from app.core.database import init_engine, SessionLocal
+from app.core.models import Client, PipelineStage, PromptTemplate
 
 init_engine(DATABASE_URL)
 

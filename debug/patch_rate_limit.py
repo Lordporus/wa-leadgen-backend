@@ -1,4 +1,8 @@
 import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import sys
 
 with open('main.py', 'r') as f:
     content = f.read()

@@ -14,6 +14,10 @@ Usage:
 The script does NOT change Airtable. It only populates Postgres in preparation
 for switching MIGRATION_MODE to "dual" (shadow writes).
 """
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 
 import re
 import logging
@@ -21,9 +25,9 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from airtable_client import AirtableClient
-import database
-from models import Lead, Message
+from app.clients.airtable_client import AirtableClient
+from app.core import database
+from app.core.models import Lead, Message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

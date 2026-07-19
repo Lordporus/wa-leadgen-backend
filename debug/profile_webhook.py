@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import os
 import time
 import asyncio
@@ -7,13 +11,13 @@ load_dotenv()
 os.environ['MIGRATION_MODE'] = 'dual'
 os.environ['WHATSAPP_SIMULATE_HUMAN_DELAY'] = 'false'
 
-from store import get_primary_store, get_secondary_store
-from webhook_store import WebhookStore
-from database import init_engine
-from config import DATABASE_URL
-from whatsapp_client import WhatsAppClient
-from gemini_client import GeminiClient
-import tenant
+from app.store.store import get_primary_store, get_secondary_store
+from app.store.webhook_store import WebhookStore
+from app.core.database import init_engine
+from app.core.config import DATABASE_URL
+from app.clients.whatsapp_client import WhatsAppClient
+from app.clients.gemini_client import GeminiClient
+from app.services import tenant
 
 class MockBackgroundTasks:
     def __init__(self):

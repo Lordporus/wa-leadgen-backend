@@ -1,7 +1,11 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import argparse
 import logging
-from airtable_client import AirtableClient
-from whatsapp_client import WhatsAppClient
+from app.clients.airtable_client import AirtableClient
+from app.clients.whatsapp_client import WhatsAppClient
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
