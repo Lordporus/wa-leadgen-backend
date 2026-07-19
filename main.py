@@ -17,36 +17,36 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from config import (
+from app.core.config import (
     WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, LORD_PHONE_NUMBER,
     FOLLOWUP_TEMPLATE_NAME, CLIENT_ID, BLOCKED_NUMBERS,
     ADMIN_SECRET, MIGRATION_MODE, JWT_SECRET, REDIS_URL,
     SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_TRACES_SAMPLE_RATE,
 )
-from whatsapp_client import WhatsAppClient
-from gemini_client import GeminiClient
-from calendly_client import CalendlyClient
-from store import get_store, get_primary_store, get_secondary_store
-from webhook_store import WebhookStore
-import tenant
-from database import SessionLocal
+from app.clients.whatsapp_client import WhatsAppClient
+from app.clients.gemini_client import GeminiClient
+from app.clients.calendly_client import CalendlyClient
+from app.store.store import get_store, get_primary_store, get_secondary_store
+from app.store.webhook_store import WebhookStore
+from app.services import tenant
+from app.core.database import SessionLocal
 from sqlalchemy import text
-from models import Client, PipelineStage, PromptTemplate, Lead, Message, EmailSuppression
-from email_client import email_client, EmailSendError
-from email_templates import (
+from app.core.models import Client, PipelineStage, PromptTemplate, Lead, Message, EmailSuppression
+from app.email.email_client import email_client, EmailSendError
+from app.email.email_templates import (
     apply_merge_fields,
     build_unsubscribe_url,
     is_valid_email_format,
     verify_unsub_token,
     wrap_email_bodies,
 )
-from email_webhooks import handle_resend_event, parse_event_json, verify_resend_signature
-from email_validation import validate_lead_email
-from email_ai import generate_email_draft
-from usage import check_limit, log_usage
+from app.email.email_webhooks import handle_resend_event, parse_event_json, verify_resend_signature
+from app.email.email_validation import validate_lead_email
+from app.email.email_ai import generate_email_draft
+from app.services.usage import check_limit, log_usage
 from redis import Redis
 from rq import Queue as RQQueue
-import analytics
+from app.services import analytics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ scheduler.add_job(
     replace_existing=True,
 )
 # Phase E7: email campaign sequence runner — due enrollments every 5 minutes
-from email_campaigns import run_campaign_tick_job
+from app.email.email_campaigns import run_campaign_tick_job
 scheduler.add_job(
     run_campaign_tick_job,
     "interval",
