@@ -21,8 +21,8 @@ import re
 import logging
 from datetime import datetime
 from apify_client import ApifyClient
-from config import APIFY_API_TOKEN
-from store import get_store
+from app.core.config import APIFY_API_TOKEN
+from app.store.store import get_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

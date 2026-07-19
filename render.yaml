@@ -63,3 +63,26 @@ services:
         sync: false       # plan_xxx for Base tier (run setup_plans() once to create)
       - key: RAZORPAY_PLAN_ID_AGENCY
         sync: false       # plan_xxx for Agency tier (run setup_plans() once to create)
+      # ── Email Outreach (Phase E0 scaffolding — send path lands in E2) ──
+      - key: EMAIL_PROVIDER
+        value: resend     # only "resend" supported in E0–E2
+      - key: EMAIL_PLATFORM_ENABLED
+        value: "false"    # flip to "true" only after Resend domain + E2 send are ready
+      - key: RESEND_API_KEY
+        sync: false       # platform Resend API key (BYOK deferred)
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false       # Resend webhook signing secret (used from E3)
+      - key: PUBLIC_API_URL
+        sync: false       # e.g. https://whatsapp-acquisition-backend.onrender.com
+      - key: EMAIL_UNSUB_SECRET
+        sync: false       # optional; E3 falls back to JWT_SECRET if empty
+      - key: EMAIL_DEFAULT_FROM_ADDRESS
+        sync: false       # optional platform default From (must be verified in Resend)
+      - key: EMAIL_DEFAULT_FROM_NAME
+        sync: false       # optional display name
+      - key: EMAIL_DAILY_CAP
+        value: "50"       # conservative outbound daily cap
+      - key: EMAIL_AI_AUTO_SEND
+        value: "false"    # E5: keep AI email drafts human-reviewed unless flipped
+      - key: EMAIL_AI_AUTO_REPLY
+        value: "true"     # E6: auto-reply to inbound email after confidence gate

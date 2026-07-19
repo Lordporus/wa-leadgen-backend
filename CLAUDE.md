@@ -325,6 +325,72 @@ RQ is sufficient for current scale. Celery migration deferred to Sprint 6 when l
 - Multi-Channel: Voice AI, Cold Email (Sprint 11-16)
 - Enterprise Scale: SSO, Read replicas (Sprint 17-24)
 
+## Sprint 11 — Email Outreach Channel (in progress)
+
+### Phase E0: Decisions & Scaffolding ✅
+- [x] Lock provider = **Resend** (HTTP via existing `requests` — no new SDK dep)
+- [x] Lock credentials = **platform-managed** `RESEND_API_KEY` (BYOK deferred)
+- [x] Lock lead model = **phone remains required**; email optional in E1+
+- [x] Lock policy = no unsolicited cold blasts without opt-in
+- [x] Add email env vars + `email_is_configured()` to `config.py`
+- [x] Add Render `envVars` placeholders in `render.yaml` (`EMAIL_PLATFORM_ENABLED` default false)
+- [x] Document vars in `PRODUCTION_READY.md`
+- [x] Scaffold `email_client.py` (readiness/status only; `send_email` → NotImplementedError until E2)
+- **Note:** No schema, no send API, no webhooks in E0. WhatsApp path untouched.
+
+### Phase E1: Schema ✅
+- [x] `clients` email settings: `email_enabled`, `email_provider`, `email_from_address`, `email_from_name`, `email_reply_to`, `email_company_address`, `email_footer_html`, `email_api_key_encrypted` (BYOK reserved — no plaintext)
+- [x] `leads` email fields: `email`, `email_status`, `email_opt_in_at`, `email_opt_in_source` (phone still required)
+- [x] Partial unique index `uq_leads_client_email` on `(client_id, email) WHERE email IS NOT NULL` + lookup index `idx_leads_client_email`
+- [x] `messages` multi-channel: `channel` (default `whatsapp`), `subject`, `provider_message_id`, `thread_id`, `email_headers`, `provider_metadata` (+ indexes)
+- [x] New table `email_suppressions` with `uq_email_suppressions_client_email`
+- [x] Alembic migration `0010_add_email_outreach_schema.py` (revision **0010**, down_revision **7fa54922a7af**)
+- [x] GENERATE-ONLY — not applied to production; use stamp-awareness when applying
+- **Note:** Migration 0010 not applied until ops run alembic upgrade with stamp awareness.
+
+### Phase E2: EmailClient + single send API ✅
+- [x] `email_client.py` — Resend `POST /emails` via `requests`, daily cap, `EmailSendError`, `send_implemented=True`
+- [x] `email_templates.py` — merge fields `{{name}}` etc., HMAC unsub tokens, compliance footer HTML/text, `List-Unsubscribe` ready
+- [x] `GET/PATCH /api/settings/email` — tenant from/reply/footer/enable (no API keys in DB)
+- [x] `POST /api/email/send` — lead_id + subject + body; gates: platform ready, tenant enabled, from address, lead email, suppression, email_status, plan cap, PUBLIC_API_URL for unsub
+- [x] Persist `messages` row with `channel=email`, subject, provider_message_id; stage bump New Lead → Contacted; `log_usage(email_sent)`
+- [x] `usage.py` — `max_emails_per_month` (base 500 / agency 5000) + `check_limit(..., "email_sent")`
+- [x] `db_client._to_fields` exposes `email` / `email_status` for API consumers
+- **Note:** Migration 0010 must be applied before send works against Postgres. WhatsApp path untouched.
+
+### Phase E3: Webhooks + suppressions + unsubscribe ✅
+- [x] `email_webhooks.py` — Svix signature verify (HMAC, no extra SDK), `handle_resend_event`
+- [x] `POST /api/webhooks/email/resend` — fail-closed without `RESEND_WEBHOOK_SECRET`; 403 on bad sig
+- [x] Events: delivered/sent/delayed/failed/opened/clicked update `messages.status`; bounce/complaint/suppressed → `email_suppressions` + `lead.email_status`
+- [x] Tenant resolve via send tags `client_id` or message → lead.client_id (never suppress cross-tenant without client)
+- [x] `GET/POST /api/email/unsubscribe` — public HMAC token handler, HTML response, RFC 8058 POST for List-Unsubscribe
+### Phase E4: Lead email management + import safety ✅
+- [x] `email_validation.py` — normalize, format check, disposable-domain blocklist (~60 common domains)
+- [x] `GET /api/leads/{lead_id}/email` — email fields + suppression flag
+- [x] `PATCH /api/leads/{lead_id}/email` — set/clear email; opt-in source/timestamp; 400 invalid/disposable; 409 tenant unique conflict; does not wipe suppressions
+- [x] Leads list `_format_lead_row` includes `email` + `email_status`
+- [x] `POST /api/email/send` uses `validate_lead_email` (disposable blocked at send too)
+### Phase E5: AI email personalization ✅
+- [x] `email_ai.py` — email channel adaptation prompt, JSON subject/body parse, guardrails (scan + PII + confidence)
+- [x] `POST /api/email/draft` — `{lead_id, intent?, notes?, use_rag?, send?}` returns draft for human review
+- [x] RAG optional (`use_rag` default true); logs `email_ai_draft` + counts toward `ai_response` cap
+- [x] Low confidence → `success=false` but still returns text for edit (`review_required`)
+- [x] Auto-send gated by `EMAIL_AI_AUTO_SEND` (default false) + `send=true` + confidence OK → reuses `POST /api/email/send` path
+### Phase E6: Inbound email + AI auto-reply ✅
+- [x] `email_client.fetch_received_email` — GET Resend `/emails/receiving/{id}` (body not in webhook)
+- [x] `email_inbound.py` — quote/signature strip, lead/tenant match, store INBOUND, takeover/limits/guardrails, AI reply JSON, send with In-Reply-To
+- [x] `email.received` handled in `email_webhooks.handle_resend_event`
+- [x] `EMAIL_AI_AUTO_REPLY` (default true) — set false for store-only
+- [x] Idempotent on `provider_message_id`; low confidence / limit → human takeover
+### Phase E7: Email campaigns / sequences ✅
+- [x] Models + migration **0011**: `email_campaigns`, `email_campaign_steps`, `email_campaign_enrollments`
+- [x] `email_campaigns.py` — create/list/update, set steps, enroll, pause/resume, due-step runner, stop conditions, analytics
+- [x] Stop reasons: reply, unsubscribed, bounce, complaint, booked, lost, takeover, suppressed, no_email, campaign_paused
+- [x] APIs: `GET/POST /api/campaigns`, `GET/PATCH /api/campaigns/{id}`, `PUT .../steps`, `POST .../enroll`, enrollment pause/resume, `GET .../analytics`
+- [x] APScheduler every 5 min: `run_campaign_tick_job`
+- [x] GENERATE-ONLY migration (not auto-applied)
+- **Email channel backend plan complete (E0–E7).**
+
 ## Technical Debt
 - db_client.py background task methods (append_message, update_lead_info, update_message_status, update_lead_score) have client_id=None default — **full scope (deferred from Sprint 10 Task 3):** making client_id required is a 6–8 file refactor. The methods are never called with client_id; callers route through store.py (DualWriteStore) + webhook_store.py wrappers that have NO client_id param, so threading it requires changing db_client.py, store.py, webhook_store.py, airtable_client.py + every call site (jobs.py ×4, main.py ×4, profile_webhook.py ×2, scraper.py ×1). Touches the live webhook hot path + dual-write path; some call sites lack client_id in scope (jobs.py appends inbound before deriving it; profile_webhook has none). Mitigated today by `leads.phone` being globally unique (None path → exactly one lead, no live cross-tenant leak). Do as a dedicated task with its own verification pass.
 - REDIS_URL defaults to localhost in config.py — must be set as env var on Render before deploying Redis queue to production

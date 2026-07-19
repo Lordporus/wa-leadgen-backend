@@ -146,6 +146,111 @@ Verify ALL of the following are set in Render dashboard (not `sync:false` placeh
 | `SENTRY_DSN` | Sentry error capture DSN | ❌ Not set — add before beta |
 | `FRONTEND_URL` | e.g. `https://wa-leadgen-frontend.onrender.com` | Verify set (used for CORS + sub-account dashboard_url) |
 
+### 🟣 Email Outreach (Phase E0 scaffolding — optional until E2)
+
+> **Status:** E0 landed (config + Render placeholders + `email_client.py` stub).  
+> **No send API / schema / webhooks yet.** Leave `EMAIL_PLATFORM_ENABLED=false` until E2 + DNS are ready.  
+> **Locked decisions:** Provider = Resend · platform-managed keys (BYOK deferred) · phone stays required on leads · no unsolicited cold blasts.
+
+| Variable | Purpose | Free / Paid | Required when |
+|----------|---------|-------------|----------------|
+| `EMAIL_PROVIDER` | Adapter key (`resend`) | Free (config) | Default `resend` |
+| `EMAIL_PLATFORM_ENABLED` | Platform kill switch (`true`/`false`) | Free | Must be `true` to enable email |
+| `RESEND_API_KEY` | Resend HTTP API key | **Resend free tier** ~3k emails/mo then paid | Before any live send (E2) |
+| `RESEND_WEBHOOK_SECRET` | Verify Resend webhooks | Included with Resend | Before delivery/bounce handling (E3) |
+| `PUBLIC_API_URL` | Backend public URL for unsub links | Free | Before unsubscribe links (E3) |
+| `EMAIL_UNSUB_SECRET` | Signed unsub tokens (optional) | Free | Optional; falls back to `JWT_SECRET` in E3 |
+| `EMAIL_DEFAULT_FROM_ADDRESS` | Platform default From | Free (needs verified domain) | Optional until per-tenant from (E1) |
+| `EMAIL_DEFAULT_FROM_NAME` | Platform default From name | Free | Optional |
+| `EMAIL_DAILY_CAP` | In-process daily outbound cap | Free | Default `50` |
+| `RESEND_API_BASE_URL` | Override Resend API host | Free | Dev/test only |
+
+**Ops before first live email (not E0 code):** create Resend account → verify sending domain (SPF/DKIM/DMARC) → set `RESEND_API_KEY` → keep platform enabled **false** until E2 send is implemented and tested.
+
+### 🟣 Email Schema (Phase E1 — generate-only migration 0010)
+
+> **Status:** E1 landed in code (`models.py` + `alembic/versions/0010_add_email_outreach_schema.py`).  
+> **NOT applied to production.** Chain: `7fa54922a7af` → `0010`. Confirm `SELECT version_num FROM alembic_version` before `alembic upgrade`.
+
+| Object | Change |
+|--------|--------|
+| `clients` | `email_enabled` (default false), `email_provider` (default resend), from/reply/footer columns, `email_api_key_encrypted` (unused until BYOK) |
+| `leads` | optional `email` + status/opt-in; partial unique `(client_id, email) WHERE email IS NOT NULL` |
+| `messages` | `channel` default `whatsapp`, subject, provider ids, JSONB headers/metadata |
+| `email_suppressions` | new table, unique `(client_id, email)` |
+
+Phone remains required. No send path until E2.
+
+### 🟣 Email Send API (Phase E2)
+
+> **Status:** E2 landed — `EmailClient.send_email`, `POST /api/email/send`, `GET|PATCH /api/settings/email`.  
+> Requires migration **0010** applied + env: `EMAIL_PLATFORM_ENABLED=true`, `RESEND_API_KEY`, `PUBLIC_API_URL`, tenant `email_enabled` + verified `email_from_address`.
+
+| Endpoint | Auth | Notes |
+|----------|------|--------|
+| `GET /api/settings/email` | API key | Tenant settings + platform status (no secrets) |
+| `PATCH /api/settings/email` | API key | Partial update; validates from/reply emails |
+| `POST /api/email/send` | API key | Body: `{lead_id, subject, body_text, body_html?}` |
+
+**Gates on send:** platform configured · tenant enabled · from address · lead has email · not suppressed · email_status not bounced/complained/unsubscribed · monthly plan cap · daily process cap · unsub URL (needs `PUBLIC_API_URL` + `JWT_SECRET` or `EMAIL_UNSUB_SECRET`).
+
+**Not in E2:** inbound reply, AI email (E3 adds webhooks + unsub handler).
+
+### 🟣 Email Webhooks & Unsubscribe (Phase E3)
+
+> **Status:** E3 landed — Resend webhook verification + suppression pipeline + public unsubscribe.
+
+| Endpoint | Auth | Notes |
+|----------|------|--------|
+| `POST /api/webhooks/email/resend` | Svix signature (`svix-id`, `svix-timestamp`, `svix-signature`) | Requires `RESEND_WEBHOOK_SECRET` (`whsec_…`) |
+| `GET /api/email/unsubscribe?token=…` | Public (signed token) | Writes `email_suppressions` reason=`unsubscribed` |
+| `POST /api/email/unsubscribe` | Public (one-click) | Same as GET for RFC 8058 |
+
+**Ops:** In Resend dashboard → Webhooks → URL `https://<PUBLIC_API_URL>/api/webhooks/email/resend` → events: `email.sent`, `email.delivered`, `email.bounced`, `email.complained`, `email.failed`, `email.delivery_delayed` (optional: opened/clicked). Copy signing secret → `RESEND_WEBHOOK_SECRET`.
+
+### 🟣 Lead Email Management (Phase E4)
+
+| Endpoint | Auth | Notes |
+|----------|------|--------|
+| `GET /api/leads/{id}/email` | API key | email, status, opt-in, suppressed flag |
+| `PATCH /api/leads/{id}/email` | API key | Body: `{email, email_opt_in_source?, mark_opt_in?}` — null/empty clears |
+
+Validation: format + max 320 chars + disposable domain blocklist. Unique per tenant → 409. Suppressed addresses can still be stored (status reflects bounce/unsub) but **send remains blocked**.
+
+### 🟣 AI Email Draft (Phase E5)
+
+| Endpoint | Auth | Notes |
+|----------|------|--------|
+| `POST /api/email/draft` | API key | Body: `{lead_id, intent?, notes?, use_rag?, send?}` |
+
+Default returns draft only (`sent: false`). Set `EMAIL_AI_AUTO_SEND=true` **and** `send=true` to auto-send after a high-confidence draft. Prefer human review → `POST /api/email/send`.
+
+### 🟣 Inbound Email Replies (Phase E6)
+
+| Piece | Notes |
+|-------|--------|
+| Webhook event | `email.received` on same `/api/webhooks/email/resend` |
+| Body fetch | Resend Receiving API (webhook is metadata-only) |
+| Match | Lead by `from` email; disambiguate multi-tenant via `to` ↔ tenant from/reply-to |
+| Store | `messages` INBOUND `channel=email` + quote-stripped body |
+| AI reply | Guardrails + confidence; `EMAIL_AI_AUTO_REPLY` (default true); takeover on low conf / cap |
+| Thread | `In-Reply-To` / `References` headers on outbound |
+
+**Ops:** Enable Receiving domain in Resend + webhook event `email.received`. Lead must already have matching `email` on file.
+
+### 🟣 Email Campaigns (Phase E7)
+
+| Endpoint | Auth | Notes |
+|----------|------|--------|
+| `GET/POST /api/campaigns` | API key | List / create (optional steps) |
+| `GET/PATCH /api/campaigns/{id}` | API key | Activate only if steps exist |
+| `PUT /api/campaigns/{id}/steps` | API key | Replace steps (not while active) |
+| `POST /api/campaigns/{id}/enroll` | API key | `{lead_ids:[]}` — campaign must be active |
+| `POST /api/campaigns/enrollments/{id}/pause\|resume` | API key | Per-lead control |
+| `GET /api/campaigns/{id}/analytics` | API key | sent / open / reply rates, stop reasons |
+
+Migration **0011** (generate-only). Scheduler tick every 5 minutes sends due steps. One active campaign enrollment per lead.
+
 ### 🟠 Required Environment Variables — Frontend (`wa-leadgen-frontend`)
 
 | Variable | Purpose | Status |
