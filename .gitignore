@@ -36,3 +36,16 @@ install.ps1
 LICENSE
 THIRD_PARTY_NOTICES.md
 .cgcignore
+
+# Phase 10: Local-only docs and debug artifacts
+docs/PRODUCTION_READY.md
+docs/RELEASE_NOTES.md
+docs/REMAINING_DEVELOPMENT.md
+docs/system_walkthrough.MD
+docs/v2_upgrade.md
+docs/whatsapp_leads_dashboard.html
+debug/backend_response.txt
+debug/body.txt
+debug/headers.txt
+debug/last_test_phone.txt
+debug/openapi.json

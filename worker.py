@@ -17,7 +17,7 @@ import sys
 from redis import Redis
 from rq import Worker, Queue
 
-from config import REDIS_URL
+from app.core.config import REDIS_URL
 
 logging.basicConfig(
     level=logging.INFO,
