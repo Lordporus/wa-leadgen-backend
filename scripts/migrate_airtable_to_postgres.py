@@ -77,8 +77,8 @@ def fetch_all_airtable_leads(airtable: AirtableClient) -> list[dict]:
 
 
 def backfill():
-    from config import DATABASE_URL
-    from database import init_engine
+    from app.core.config import DATABASE_URL
+    from app.core.database import init_engine
     init_engine(DATABASE_URL)
     if not database.is_configured():
         logger.error("DATABASE_URL not configured. Aborting backfill.")

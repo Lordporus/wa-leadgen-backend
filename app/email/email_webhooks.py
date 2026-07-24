@@ -253,7 +253,7 @@ def handle_resend_event(event: dict[str, Any]) -> str:
     # Phase E6: inbound receiving
     if event_type in _INBOUND_EVENTS:
         try:
-            from email_inbound import process_inbound_email_event
+            from app.email.email_inbound import process_inbound_email_event
 
             result = process_inbound_email_event(data)
             logger.info(

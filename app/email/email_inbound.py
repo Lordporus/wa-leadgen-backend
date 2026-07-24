@@ -413,7 +413,7 @@ def process_inbound_email_event(
         # RAG
         rag_context = ""
         try:
-            from rag import retrieve_context
+            from app.services.rag import retrieve_context
 
             chunks = retrieve_context(db_client.id, llm_text, top_k=3)
             if chunks:
@@ -421,7 +421,7 @@ def process_inbound_email_event(
         except Exception as e:
             logger.warning("RAG for inbound email failed: %s", e)
 
-        import tenant as tenant_mod
+        from app.services import tenant as tenant_mod
 
         gemini = tenant_mod.get_gemini_for_client(db_client)
         history_blob = _build_email_history_for_ai(session, lead.id)
@@ -464,7 +464,7 @@ EMAIL REPLY RULES:
         finally:
             gemini._system_prompt = original_prompt
 
-        from email_ai import _parse_subject_body
+        from app.email.email_ai import _parse_subject_body
 
         reply_subject, reply_body = _parse_subject_body(str(raw_ai or ""))
         if not reply_body:

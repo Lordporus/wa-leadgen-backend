@@ -842,10 +842,10 @@ def draft_email_for_lead(
     Default: returns subject + body_text for human review (does not send).
     Optional send=true only works when EMAIL_AI_AUTO_SEND=true AND confidence OK.
     """
-    from config import EMAIL_AI_AUTO_SEND
-    from guardrails import CONFIDENCE_THRESHOLD
-    from rag import retrieve_context
-    import tenant as tenant_mod
+    from app.core.config import EMAIL_AI_AUTO_SEND
+    from app.services.guardrails import CONFIDENCE_THRESHOLD
+    from app.services.rag import retrieve_context
+    from app.services import tenant as tenant_mod
 
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
@@ -968,7 +968,7 @@ async def resend_email_webhook(request: Request, response: Response):
     Signature verified first (Svix headers + RESEND_WEBHOOK_SECRET), same
     fail-closed pattern as WhatsApp HMAC and Razorpay webhooks.
     """
-    from config import RESEND_WEBHOOK_SECRET
+    from app.core.config import RESEND_WEBHOOK_SECRET
 
     body_bytes = await request.body()
     if not RESEND_WEBHOOK_SECRET:
@@ -1168,7 +1168,7 @@ def list_email_campaigns(
     response: Response,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     rows = camp.list_campaigns(client.id)
     return {"campaigns": rows, "count": len(rows)}
@@ -1182,7 +1182,7 @@ def create_email_campaign(
     body: CampaignCreateBody,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     steps = None
     if body.steps:
@@ -1204,7 +1204,7 @@ def get_email_campaign(
     campaign_id: int,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     row = camp.get_campaign(client.id, campaign_id)
     if not row:
@@ -1221,7 +1221,7 @@ def update_email_campaign(
     body: CampaignUpdateBody,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.update_campaign(
@@ -1243,7 +1243,7 @@ def put_email_campaign_steps(
     client: Client = Depends(require_api_key),
 ):
     """Replace all steps (campaign must not be active)."""
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.set_campaign_steps(
@@ -1264,7 +1264,7 @@ def enroll_email_campaign(
     body: CampaignEnrollBody,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.enroll_leads(client.id, campaign_id, body.lead_ids)
@@ -1283,7 +1283,7 @@ def list_email_campaign_enrollments(
     client: Client = Depends(require_api_key),
 ):
     """List enrollments for a campaign (lead name/email + status for pause/resume UI)."""
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.list_enrollments(client.id, campaign_id)
@@ -1301,7 +1301,7 @@ def pause_campaign_enrollment(
     enrollment_id: int,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.pause_enrollment(client.id, enrollment_id)
@@ -1319,7 +1319,7 @@ def resume_campaign_enrollment(
     enrollment_id: int,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.resume_enrollment(client.id, enrollment_id)
@@ -1337,7 +1337,7 @@ def email_campaign_analytics(
     campaign_id: int,
     client: Client = Depends(require_api_key),
 ):
-    import email_campaigns as camp
+    from app.email import email_campaigns as camp
 
     try:
         return camp.campaign_analytics(client.id, campaign_id)
@@ -1806,7 +1806,7 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
             # Postgres not configured; no messages can exist.
             return []
 
-        from models import Lead, Message
+        from app.core.models import Lead, Message
         with SessionLocal() as s:
             # Verify lead exists AND belongs to this tenant (client_id scoping).
             # This is the only authz check needed — we don't go through store here.
@@ -1880,7 +1880,7 @@ def update_lead_stage(request: Request, response: Response, lead_id: str, body: 
 @limiter.limit("60/minute", key_func=get_client_key)
 def takeover_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
     """Pause AI for this lead — human takes over the conversation."""
-    from models import Lead
+    from app.core.models import Lead
     with SessionLocal() as s:
         lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
         if not lead:
@@ -1893,7 +1893,7 @@ def takeover_lead(request: Request, response: Response, lead_id: int, client: Cl
 @limiter.limit("60/minute", key_func=get_client_key)
 def release_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
     """Resume AI for this lead — end human takeover."""
-    from models import Lead
+    from app.core.models import Lead
     with SessionLocal() as s:
         lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
         if not lead:
@@ -2071,7 +2071,7 @@ class SendMessageBody(BaseModel):
 @limiter.limit("60/minute", key_func=get_client_key)
 def send_human_message(request: Request, response: Response, lead_id: int, body: SendMessageBody, client: Client = Depends(require_api_key)):
     """Send a manual WhatsApp message to the lead."""
-    from db_client import PHONE_KEY
+    from app.store.db_client import PHONE_KEY
     
     lead = store.get_lead_by_id(lead_id, client.id)
     if not lead:
@@ -2257,7 +2257,7 @@ def agency_analytics(request: Request, response: Response, client: Client = Depe
     avg_response_time_seconds is a message-weighted mean across days/accounts
     that had answerable outbound traffic (None days skipped, never zero-filled).
     """
-    from models import Client as ClientModel, DailyStat
+    from app.core.models import Client as ClientModel, DailyStat
 
     # IST "today" — daily_stats keys are IST calendar dates (see analytics.py).
     IST = timezone(timedelta(hours=5, minutes=30))
@@ -2354,7 +2354,7 @@ def agency_analytics(request: Request, response: Response, client: Client = Depe
 @limiter.limit("10/minute", key_func=get_client_key)
 def upload_document(request: Request, response: Response, file: UploadFile, client: Client = Depends(require_api_key)):
     """Upload a PDF or TXT file to the tenant's knowledge base."""
-    from usage import check_limit
+    from app.services.usage import check_limit
     plan = client.plan_tier or "base"
     allowed, reason = check_limit(client.id, "document_upload", plan=plan)
     if not allowed:
@@ -2389,7 +2389,7 @@ def upload_document(request: Request, response: Response, file: UploadFile, clie
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="Could not extract any text from file.")
 
-    from ingestion import ingest_document
+    from app.services.ingestion import ingest_document
     stored = ingest_document(client.id, fname, text_content)
     return {"success": True, "filename": fname, "chunks_stored": stored}
 
@@ -2398,7 +2398,7 @@ def upload_document(request: Request, response: Response, file: UploadFile, clie
 @limiter.limit("60/minute", key_func=get_client_key)
 def list_documents(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """List distinct documents uploaded by this tenant."""
-    from models import Document as DocModel
+    from app.core.models import Document as DocModel
     from sqlalchemy import func
     with SessionLocal() as s:
         rows = (
@@ -2420,7 +2420,7 @@ def list_documents(request: Request, response: Response, client: Client = Depend
 @limiter.limit("10/minute", key_func=get_client_key)
 def billing_checkout(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """Create a Razorpay order for the client's plan upgrade."""
-    from billing import create_subscription
+    from app.services.billing import create_subscription
     plan = request.query_params.get("plan", "base")
     try:
         result = create_subscription(client.id, plan)
@@ -2435,7 +2435,7 @@ def billing_checkout(request: Request, response: Response, client: Client = Depe
 @limiter.limit("100/minute")
 async def billing_webhook(request: Request, response: Response):
     """Receive and verify Razorpay webhook events."""
-    from billing import verify_webhook_signature, handle_webhook
+    from app.services.billing import verify_webhook_signature, handle_webhook
 
     signature = request.headers.get("X-Razorpay-Signature", "")
     body_bytes = await request.body()
@@ -2458,7 +2458,7 @@ async def billing_webhook(request: Request, response: Response):
 @limiter.limit("60/minute", key_func=get_client_key)
 def billing_status(request: Request, response: Response, client: Client = Depends(require_api_key)):
     """Return the client's current billing status and monthly usage summary."""
-    from usage import get_monthly_usage, PLAN_LIMITS, DEFAULT_PLAN
+    from app.services.usage import get_monthly_usage, PLAN_LIMITS, DEFAULT_PLAN
 
     plan = client.plan_tier or "base"
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS[DEFAULT_PLAN])
@@ -2550,8 +2550,8 @@ def _process_analytics_and_extraction_bg(
     Background worker that runs analytics (scoring, extraction) and CRM updates
     outside the critical HTTP webhook path.
     """
-    from store import get_store
-    from gemini_client import GeminiClient
+    from app.store.store import get_store
+    from app.clients.gemini_client import GeminiClient
 
     store = get_store()
     req_gemini = GeminiClient(system_prompt=system_prompt, calendly_link=calendly_link)
@@ -2649,8 +2649,8 @@ async def receive_message(request: Request, response: Response, background_tasks
                         # DB-level dedup fallback when Redis unavailable
                         if msg_id:
                             try:
-                                from database import SessionLocal
-                                from models import Message
+                                from app.core.database import SessionLocal
+                                from app.core.models import Message
                                 from sqlalchemy import select
                                 with SessionLocal() as session:
                                     existing = session.execute(
@@ -2663,12 +2663,12 @@ async def receive_message(request: Request, response: Response, background_tasks
                                 logger.warning(f"DB dedup check failed: {db_err}")
 
                         # Use BackgroundTasks directly instead of RQ (since no worker is deployed yet)
-                        from jobs import process_webhook_message
+                        from app.services.jobs import process_webhook_message
                         background_tasks.add_task(process_webhook_message, phone_number_id=phone_number_id, message_data=message)
 
                 if "statuses" in value:
                     for status in value["statuses"]:
-                        from jobs import process_status_update
+                        from app.services.jobs import process_status_update
                         background_tasks.add_task(process_status_update, status_data=status)
 
         return {"status": "queued"}
@@ -2687,7 +2687,7 @@ def analytics_summary(request: Request, response: Response, client: Client = Dep
     the days that had answerable outbound traffic (days with None are skipped),
     so it stays honest rather than averaging in zeros.
     """
-    from models import DailyStat
+    from app.core.models import DailyStat
 
     # IST "today" — daily_stats keys are IST calendar dates (see analytics.py).
     IST = timezone(timedelta(hours=5, minutes=30))
@@ -2767,7 +2767,7 @@ def analytics_response_time(request: Request, response: Response, client: Client
     frontend can render a gap instead of a misleading dip to zero. The window's
     overall `avg_seconds` is a message-weighted mean across days that had data.
     """
-    from models import DailyStat
+    from app.core.models import DailyStat
 
     IST = timezone(timedelta(hours=5, minutes=30))
     today_ist = datetime.now(timezone.utc).astimezone(IST).date()
