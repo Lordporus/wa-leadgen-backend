@@ -1733,7 +1733,26 @@ def list_leads(request: Request, response: Response, client: Client = Depends(re
     except Exception:
         raise HTTPException(status_code=503, detail="data source unavailable")
 
-    return [_format_lead_row(r) for r in records]
+    results = []
+    if not records:
+        return results
+
+    phones = [r.get("fields", {}).get("Phone number type", "") for r in records if r.get("fields", {}).get("Phone number type")]
+    phone_to_pg_id = {}
+    if phones and SessionLocal:
+        with SessionLocal() as s:
+            pg_leads = s.query(Lead.phone, Lead.id).filter(Lead.phone.in_(phones), Lead.client_id == client.id).all()
+            phone_to_pg_id = {row.phone: row.id for row in pg_leads}
+
+    for r in records:
+        row = _format_lead_row(r)
+        phone = r.get("fields", {}).get("Phone number type", "")
+        pg_id = phone_to_pg_id.get(phone)
+        if pg_id:
+            row["id"] = pg_id
+        results.append(row)
+
+    return results
 
 
 @app.get("/api/leads/{lead_id}")
@@ -1741,8 +1760,26 @@ def list_leads(request: Request, response: Response, client: Client = Depends(re
 def get_lead_detail(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Return a single lead with full conversation history."""
     try:
-        parsed_id = int(lead_id) if lead_id.isdigit() else lead_id
-        record = store.get_lead_by_id(parsed_id, client_id=client.id)
+        pg_id = None
+        if lead_id.isdigit():
+            pg_id = int(lead_id)
+            if SessionLocal:
+                with SessionLocal() as s:
+                    pg_lead = s.query(Lead.phone).filter(Lead.id == pg_id, Lead.client_id == client.id).first()
+                    if not pg_lead:
+                        raise HTTPException(status_code=404, detail="Lead not found")
+                    record = store.get_lead(pg_lead.phone)
+            else:
+                record = None
+        else:
+            record = store.get_lead_by_id(lead_id, client_id=client.id)
+            if record and SessionLocal:
+                phone = record.get("fields", {}).get("Phone number type")
+                if phone:
+                    with SessionLocal() as s:
+                        pg_lead_row = s.query(Lead.id).filter(Lead.phone == phone, Lead.client_id == client.id).first()
+                        if pg_lead_row:
+                            pg_id = pg_lead_row.id
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid lead ID format")
     except Exception as e:
@@ -1770,7 +1807,7 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
     created_str = created_dt.strftime("%b %d, %Y") if created_dt else "—"
 
     return {
-        "id":              record["id"],
+        "id":              pg_id if pg_id else record["id"],
         "name":            fields.get("Name", "Unknown"),
         "phone":           fields.get("Phone number type", ""),
         "city":            _parse_city(last_msg),
@@ -1795,12 +1832,11 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
     would silently return [] and be a functional regression. Direct Postgres
     query is the correct and intentional path here.
     """
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    parsed_id = int(lead_id)
+
     try:
-        # lead_id may arrive as a Postgres integer ID or an Airtable string ID.
-        try:
-            parsed_id = int(lead_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid lead ID — must be a numeric Postgres ID")
 
         if not SessionLocal:
             # Postgres not configured; no messages can exist.
@@ -1878,8 +1914,11 @@ def update_lead_stage(request: Request, response: Response, lead_id: str, body: 
 
 @app.post("/api/leads/{lead_id}/takeover", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
-def takeover_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
-    """Pause AI for this lead — human takes over the conversation."""
+def takeover_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+    """Human overrides the AI chatbot for this lead."""
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead_id = int(lead_id)
     from app.core.models import Lead
     with SessionLocal() as s:
         lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
@@ -1891,8 +1930,11 @@ def takeover_lead(request: Request, response: Response, lead_id: int, client: Cl
 
 @app.post("/api/leads/{lead_id}/release", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
-def release_lead(request: Request, response: Response, lead_id: int, client: Client = Depends(require_api_key)):
-    """Resume AI for this lead — end human takeover."""
+def release_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+    """Human gives control back to the AI chatbot."""
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead_id = int(lead_id)
     from app.core.models import Lead
     with SessionLocal() as s:
         lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
@@ -1930,10 +1972,14 @@ def _lead_email_payload(lead: Lead, *, suppressed: bool = False, suppress_reason
 def get_lead_email(
     request: Request,
     response: Response,
-    lead_id: int,
+    lead_id: str,
     client: Client = Depends(require_api_key),
 ):
     """Return email fields + suppression status for a lead."""
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead_id = int(lead_id)
+
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
     with SessionLocal() as s:
@@ -1962,7 +2008,7 @@ def get_lead_email(
 def update_lead_email(
     request: Request,
     response: Response,
-    lead_id: int,
+    lead_id: str,
     body: LeadEmailUpdateBody,
     client: Client = Depends(require_api_key),
 ):
@@ -1974,6 +2020,10 @@ def update_lead_email(
     - Enforces tenant-scoped uniqueness (409 if another lead owns the address)
     - Does not auto-remove suppressions (compliance: unsub/bounce stay blocked)
     """
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead_id = int(lead_id)
+
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
 

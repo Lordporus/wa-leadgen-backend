@@ -49,3 +49,9 @@ debug/body.txt
 debug/headers.txt
 debug/last_test_phone.txt
 debug/openapi.json
+audit_imports.py
+extract_envs.py
+extract_lazy.py
+fix_bare_imports.py
+fix_bare_imports2.py
+get_funcs.py
