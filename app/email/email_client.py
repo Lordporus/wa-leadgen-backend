@@ -118,6 +118,7 @@ class EmailClient:
         reply_to: str | None = None,
         headers: dict[str, str] | None = None,
         tags: dict[str, str] | None = None,
+        idempotency_key: str | None = None,
     ) -> EmailSendResult:
         """
         Send one email via the configured provider.
@@ -172,6 +173,8 @@ class EmailClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        if idempotency_key:
+            req_headers["Idempotency-Key"] = str(idempotency_key)[:256]
 
         try:
             response = requests.post(url, headers=req_headers, json=payload, timeout=30)

@@ -54,8 +54,8 @@ class DualWriteStore:
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         return self._primary.get_contacted_leads(client_id)
 
-    def get_lead(self, phone: str) -> dict | None:
-        return self._primary.get_lead(phone)
+    def get_lead(self, phone: str, client_id: int | None = None) -> dict | None:
+        return self._primary.get_lead(phone, client_id=client_id)
 
     def get_all_leads(self, client_id=None) -> list:
         return self._primary.get_all_leads(client_id=client_id)
@@ -82,9 +82,18 @@ class DualWriteStore:
         self._safe(lambda: self._secondary.update_lead_status(phone, status), "update_lead_status", phone)
         return result
 
-    def update_lead_status_by_id(self, record_id: str, status: str) -> dict | None:
+    def update_lead_status_by_id(
+        self,
+        record_id: str,
+        status: str,
+        client_id: int | None = None,
+    ) -> dict | None:
         # Only primary — Postgres secondary doesn't track Airtable record IDs.
-        return self._primary.update_lead_status_by_id(record_id, status)
+        return self._primary.update_lead_status_by_id(
+            record_id,
+            status,
+            client_id=client_id,
+        )
 
     def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
         result = self._primary.append_message(phone, direction, message, msg_type, wa_message_id)
