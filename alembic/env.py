@@ -49,6 +49,19 @@ def run_migrations_online() -> None:
             "DATABASE_URL is not set. Cannot run online migrations."
         )
 
+    # The serialized Render migration wrapper supplies the exact connection
+    # holding pg_advisory_xact_lock. Reusing it keeps the lock and all Alembic
+    # DDL in one transaction, including behind a transaction pooler.
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        context.configure(
+            connection=supplied_connection,
+            target_metadata=target_metadata,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     cfg = config.get_section(config.config_ini_section, {})
     cfg["sqlalchemy.url"] = url
 

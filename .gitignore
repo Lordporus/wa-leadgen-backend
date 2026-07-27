@@ -24,7 +24,9 @@ opencode.jsonc
 # One-off scripts — local dev only, never commit
 _find_region.py
 test_*.py
+!tests/**/test_*.py
 run_*.py
+!scripts/run_migrations.py
 
 # Build artefacts / local-only docs
 *.html
@@ -55,3 +57,19 @@ extract_lazy.py
 fix_bare_imports.py
 fix_bare_imports2.py
 get_funcs.py
+
+
+
+# Local documentation
+PROJECT_HANDOVER.md
+audit_secrets.py
+
+# Local debugging
+debug/live_checks/
+
+# Pytest cache
+.pytest_cache/
+
+# Python cache
+__pycache__/
+*.pyc

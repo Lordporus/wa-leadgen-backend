@@ -10,11 +10,82 @@ from app.api.runtime import logger, store, whatsapp
 from app.core.database import SessionLocal
 from app.core.models import Client, EmailSuppression, Lead, Message
 from app.email.email_validation import validate_lead_email
+from app.store.db_client import DatabaseClient
 
 router = APIRouter()
 
 class StageUpdateBody(BaseModel):
     stage: str
+
+
+def _is_postgres_store() -> bool:
+    return isinstance(store, DatabaseClient)
+
+
+def _load_postgres_lead(*, lead_id: int | None = None, phone: str | None = None, client_id: int):
+    """Resolve a Postgres lead with mandatory tenant scoping."""
+    if not SessionLocal or (lead_id is None and not phone):
+        return None
+    with SessionLocal() as session:
+        query = session.query(Lead).filter(Lead.client_id == client_id)
+        if lead_id is not None:
+            query = query.filter(Lead.id == lead_id)
+        else:
+            query = query.filter(Lead.phone == phone)
+        return query.first()
+
+
+def _store_record_for_lead_id(lead_id: str, client_id: int) -> dict | None:
+    """
+    Resolve the public lead ID without changing its dual-mode contract.
+
+    Dual/Airtable mode uses Airtable record IDs. Postgres mode uses numeric
+    primary keys serialized as strings. Numeric IDs emitted by the previous
+    branch revision remain accepted in dual mode as a scoped legacy fallback.
+    """
+    normalized = str(lead_id or "").strip()
+    if not normalized:
+        return None
+
+    if _is_postgres_store():
+        if not normalized.isdigit():
+            return None
+        return store.get_lead_by_id(int(normalized), client_id=client_id)
+
+    if not normalized.isdigit():
+        return store.get_lead_by_id(normalized, client_id=client_id)
+
+    pg_lead = _load_postgres_lead(lead_id=int(normalized), client_id=client_id)
+    if not pg_lead:
+        return None
+    return store.get_lead(pg_lead.phone, client_id=client_id)
+
+
+def _postgres_lead_id_for_record(
+    lead_id: str,
+    record: dict,
+    client_id: int,
+) -> int | None:
+    """Return the tenant-scoped Postgres ID behind a public lead record."""
+    normalized = str(lead_id or "").strip()
+    if _is_postgres_store() and normalized.isdigit():
+        return int(normalized)
+
+    phone = record.get("fields", {}).get("Phone number type")
+    pg_lead = _load_postgres_lead(
+        lead_id=int(normalized) if normalized.isdigit() else None,
+        phone=phone,
+        client_id=client_id,
+    )
+    return pg_lead.id if pg_lead else None
+
+
+def _append_store_message(*, phone: str, client_id: int, **kwargs) -> bool:
+    """Pass tenant context to Postgres without changing Airtable signatures."""
+    if _is_postgres_store():
+        return store.append_message(phone=phone, client_id=client_id, **kwargs)
+    return store.append_message(phone=phone, **kwargs)
+
 
 def _parse_created_at(raw: str) -> datetime | None:
     if not raw or not isinstance(raw, str):
@@ -139,7 +210,7 @@ def _format_lead_row(record: dict) -> dict:
             last_message_preview = (parts[1] if len(parts) > 1 else raw_line).strip()[:80]
 
     return {
-        "id":            record["id"],
+        "id":            str(record["id"]),
         "name":          fields.get("Name", "Unknown"),
         "phone":         fields.get("Phone number type", ""),
         "email":         fields.get("email") or None,
@@ -203,26 +274,7 @@ def list_leads(request: Request, response: Response, client: Client = Depends(re
     except Exception:
         raise HTTPException(status_code=503, detail="data source unavailable")
 
-    results = []
-    if not records:
-        return results
-
-    phones = [r.get("fields", {}).get("Phone number type", "") for r in records if r.get("fields", {}).get("Phone number type")]
-    phone_to_pg_id = {}
-    if phones and SessionLocal:
-        with SessionLocal() as s:
-            pg_leads = s.query(Lead.phone, Lead.id).filter(Lead.phone.in_(phones), Lead.client_id == client.id).all()
-            phone_to_pg_id = {row.phone: row.id for row in pg_leads}
-
-    for r in records:
-        row = _format_lead_row(r)
-        phone = r.get("fields", {}).get("Phone number type", "")
-        pg_id = phone_to_pg_id.get(phone)
-        if pg_id:
-            row["id"] = pg_id
-        results.append(row)
-
-    return results
+    return [_format_lead_row(record) for record in records]
 
 
 @router.get("/api/leads/{lead_id}")
@@ -230,28 +282,9 @@ def list_leads(request: Request, response: Response, client: Client = Depends(re
 def get_lead_detail(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Return a single lead with full conversation history."""
     try:
-        pg_id = None
-        if lead_id.isdigit():
-            pg_id = int(lead_id)
-            if SessionLocal:
-                with SessionLocal() as s:
-                    pg_lead = s.query(Lead.phone).filter(Lead.id == pg_id, Lead.client_id == client.id).first()
-                    if not pg_lead:
-                        raise HTTPException(status_code=404, detail="Lead not found")
-                    record = store.get_lead(pg_lead.phone)
-            else:
-                record = None
-        else:
-            record = store.get_lead_by_id(lead_id, client_id=client.id)
-            if record and SessionLocal:
-                phone = record.get("fields", {}).get("Phone number type")
-                if phone:
-                    with SessionLocal() as s:
-                        pg_lead_row = s.query(Lead.id).filter(Lead.phone == phone, Lead.client_id == client.id).first()
-                        if pg_lead_row:
-                            pg_id = pg_lead_row.id
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid lead ID format")
+        record = _store_record_for_lead_id(lead_id, client.id)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch lead {lead_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -277,7 +310,7 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
     created_str = created_dt.strftime("%b %d, %Y") if created_dt else "—"
 
     return {
-        "id":              pg_id if pg_id else record["id"],
+        "id":              str(record["id"]),
         "name":            fields.get("Name", "Unknown"),
         "phone":           fields.get("Phone number type", ""),
         "city":            _parse_city(last_msg),
@@ -302,11 +335,13 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
     would silently return [] and be a functional regression. Direct Postgres
     query is the correct and intentional path here.
     """
-    if not lead_id.isdigit():
-        raise HTTPException(status_code=404, detail="Lead not found")
-    parsed_id = int(lead_id)
-
     try:
+        record = _store_record_for_lead_id(lead_id, client.id)
+        if not record:
+            return []
+        parsed_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+        if parsed_id is None:
+            return []
 
         if not SessionLocal:
             # Postgres not configured; no messages can exist.
@@ -367,13 +402,36 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
 
 @router.patch("/api/leads/{lead_id}/stage", dependencies=[Depends(require_api_key)])
 @limiter.limit("120/minute", key_func=get_client_key)
-def update_lead_stage(request: Request, response: Response, lead_id: str, body: StageUpdateBody):
-    """Update the pipeline stage for a lead by Airtable record ID."""
+def update_lead_stage(
+    request: Request,
+    response: Response,
+    lead_id: str,
+    body: StageUpdateBody,
+    client: Client = Depends(require_api_key),
+):
+    """Update a lead stage using the active mode's stable public ID."""
     valid_stages = {"New Lead", "Contacted", "Qualified", "Booked", "Lost"}
     if body.stage not in valid_stages:
         raise HTTPException(status_code=422, detail=f"Invalid stage. Must be one of: {valid_stages}")
     try:
-        result = store.update_lead_status_by_id(lead_id, body.stage)
+        record = _store_record_for_lead_id(lead_id, client.id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Lead not found or update failed")
+        record_id = str(record["id"])
+        if _is_postgres_store():
+            result = store.update_lead_status_by_id(
+                record_id,
+                body.stage,
+                client_id=client.id,
+            )
+        else:
+            result = store.update_lead_status_by_id(
+                record_id,
+                body.stage,
+                client_id=client.id,
+            )
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=503, detail="data source unavailable")
 
@@ -386,33 +444,39 @@ def update_lead_stage(request: Request, response: Response, lead_id: str, body: 
 @limiter.limit("60/minute", key_func=get_client_key)
 def takeover_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Human overrides the AI chatbot for this lead."""
-    if not lead_id.isdigit():
+    record = _store_record_for_lead_id(lead_id, client.id)
+    if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    lead_id = int(lead_id)
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
     from app.core.models import Lead
     with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
         lead.is_human_takeover = True
         s.commit()
-    return {"success": True, "lead_id": lead_id, "is_human_takeover": True}
+    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": True}
 
 @router.post("/api/leads/{lead_id}/release", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
 def release_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
     """Human gives control back to the AI chatbot."""
-    if not lead_id.isdigit():
+    record = _store_record_for_lead_id(lead_id, client.id)
+    if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    lead_id = int(lead_id)
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
     from app.core.models import Lead
     with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
         lead.is_human_takeover = False
         s.commit()
-    return {"success": True, "lead_id": lead_id, "is_human_takeover": False}
+    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": False}
 
 
 # ── Lead email management (Phase E4) ──────────────────────────────────────
@@ -446,14 +510,17 @@ def get_lead_email(
     client: Client = Depends(require_api_key),
 ):
     """Return email fields + suppression status for a lead."""
-    if not lead_id.isdigit():
+    record = _store_record_for_lead_id(lead_id, client.id)
+    if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    lead_id = int(lead_id)
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
 
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
     with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
         suppressed = False
@@ -490,9 +557,12 @@ def update_lead_email(
     - Enforces tenant-scoped uniqueness (409 if another lead owns the address)
     - Does not auto-remove suppressions (compliance: unsub/bounce stay blocked)
     """
-    if not lead_id.isdigit():
+    record = _store_record_for_lead_id(lead_id, client.id)
+    if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    lead_id = int(lead_id)
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
 
     if not SessionLocal:
         raise HTTPException(status_code=500, detail="Database not configured")
@@ -511,7 +581,7 @@ def update_lead_email(
         new_email = None
 
     with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == lead_id, Lead.client_id == client.id).first()
+        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -589,11 +659,11 @@ class SendMessageBody(BaseModel):
 
 @router.post("/api/leads/{lead_id}/send-message", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
-def send_human_message(request: Request, response: Response, lead_id: int, body: SendMessageBody, client: Client = Depends(require_api_key)):
+def send_human_message(request: Request, response: Response, lead_id: str, body: SendMessageBody, client: Client = Depends(require_api_key)):
     """Send a manual WhatsApp message to the lead."""
     from app.store.db_client import PHONE_KEY
 
-    lead = store.get_lead_by_id(lead_id, client.id)
+    lead = _store_record_for_lead_id(lead_id, client.id)
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -608,8 +678,9 @@ def send_human_message(request: Request, response: Response, lead_id: int, body:
         logger.error("Failed to send manual message", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to send WhatsApp message")
 
-    store.append_message(
+    _append_store_message(
         phone=phone,
+        client_id=client.id,
         direction="OUTBOUND",
         message=body.message,
         msg_type="human",

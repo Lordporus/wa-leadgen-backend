@@ -1,7 +1,12 @@
 import requests
 import logging
 from datetime import datetime
-from app.core.config import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
+from app.core.config import (
+    AIRTABLE_API_KEY,
+    AIRTABLE_BASE_ID,
+    AIRTABLE_TABLE_NAME,
+    CLIENT_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +16,10 @@ class AirtableClient:
     Uses raw requests — no pyairtable dependency (avoids pydantic v1/Python 3.12 crash).
     """
     def __init__(self):
+        # An Airtable base/table is configured per deployed tenant. Keep that
+        # ownership at the client boundary so a caller cannot use a valid
+        # record ID with another authenticated client_id.
+        self.client_id = CLIENT_ID
         self.ok = all([AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME])
         if not self.ok:
             logger.warning("Airtable credentials not fully configured.")
@@ -25,9 +34,14 @@ class AirtableClient:
 
     # ── internal helpers ──────────────────────────────────────────────────
 
+    def _owns_tenant(self, client_id: int | None) -> bool:
+        """Return whether this configured Airtable table belongs to client_id."""
+        return client_id is None or int(client_id) == self.client_id
+
     def _search(self, formula: str, client_id=None) -> list:
-        """Return list of matching Airtable records. client_id ignored — single tenant."""
-        if not self.ok: return []
+        """Return matching records only for this configured tenant."""
+        if not self.ok or not self._owns_tenant(client_id):
+            return []
         try:
             resp = requests.get(
                 self.base_url,
@@ -75,9 +89,12 @@ class AirtableClient:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def get_lead(self, phone: str) -> dict | None:
+    def get_lead(self, phone: str, client_id: int | None = None) -> dict | None:
         """Return the first record matching this phone, or None."""
-        records = self._search(f"{{Phone number type}}='{phone}'")
+        records = self._search(
+            f"{{Phone number type}}='{phone}'",
+            client_id=client_id,
+        )
         return records[0] if records else None
 
     def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
@@ -105,30 +122,34 @@ class AirtableClient:
             logger.info(f"Status updated → {status}: {phone}")
         return updated
 
-    def update_lead_status_by_id(self, record_id: str, status: str) -> dict | None:
-        """Update the Status field directly by Airtable record ID."""
+    def update_lead_status_by_id(
+        self,
+        record_id: str,
+        status: str,
+        client_id: int | None = None,
+    ) -> dict | None:
+        """Update a record only when it belongs to this configured tenant."""
+        if not self.get_lead_by_id(record_id, client_id=client_id):
+            return None
         updated = self._update(record_id, {"Status": status})
         if updated:
             logger.info(f"Status updated → {status}: record {record_id}")
         return updated
 
     def get_all_leads(self, client_id=None) -> list:
-        """Return all records from the leads table. client_id ignored — single tenant."""
-        return self._search("") if self.ok else []
+        """Return all records from this tenant's configured leads table."""
+        return self._search("", client_id=client_id) if self.ok else []
 
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         """
-        Return contacted leads. Airtable only supports client_id=1.
-        Returns empty list for any other client.
+        Return contacted leads for this configured tenant.
         """
-        if client_id != 1:
-            return []
-        return self._search("{Status}='Contacted'")
+        return self._search("{Status}='Contacted'", client_id=client_id)
 
 
     def get_lead_by_id(self, record_id: str, client_id: int | None = None) -> dict | None:
-        """Return a single record by its Airtable record ID."""
-        if not self.ok:
+        """Return a record only for this configured tenant."""
+        if not self.ok or not self._owns_tenant(client_id):
             return None
         try:
             resp = requests.get(
@@ -144,6 +165,8 @@ class AirtableClient:
 
     def get_messages_for_lead(self, lead_id: str, client_id: int | None = None) -> list:
         # Airtable doesn't store separate message rows. Messages are parsed from the Lead's Last_Message field.
+        if not self._owns_tenant(client_id):
+            return []
         return []
 
     def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
@@ -197,4 +220,3 @@ class _TableShim:
 
     def create(self, fields: dict) -> dict | None:
         return self._client._create(fields)
-

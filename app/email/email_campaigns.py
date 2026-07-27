@@ -9,6 +9,7 @@ Email campaign sequences — Phase E7.
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -27,6 +28,7 @@ from app.email.email_validation import validate_lead_email
 from app.core.models import (
     Client,
     EmailCampaign,
+    EmailCampaignDeliveryAttempt,
     EmailCampaignEnrollment,
     EmailCampaignStep,
     EmailSuppression,
@@ -47,6 +49,10 @@ _MAX_DUE_PER_TICK = 50
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _new_delivery_run_id() -> str:
+    return uuid4().hex
 
 
 def check_stop_conditions(
@@ -373,6 +379,7 @@ def enroll_leads(
                 existing.enrolled_at = now
                 existing.updated_at = now
                 existing.last_sent_at = None
+                existing.delivery_run_id = _new_delivery_run_id()
                 enrolled.append(existing.id)
                 continue
 
@@ -402,6 +409,7 @@ def enroll_leads(
                 client_id=client_id,
                 status="active",
                 current_step=0,
+                delivery_run_id=_new_delivery_run_id(),
                 next_run_at=now + timedelta(hours=first_delay),
                 enrolled_at=now,
                 updated_at=now,
@@ -524,38 +532,149 @@ def process_due_enrollments(limit: int = _MAX_DUE_PER_TICK) -> dict:
 
     now = _utcnow()
     stats = {"processed": 0, "sent": 0, "stopped": 0, "errors": 0, "skipped": 0}
+    processed_ids: set[int] = set()
 
-    with SessionLocal() as session:
-        due = (
-            session.query(EmailCampaignEnrollment)
-            .filter(
-                EmailCampaignEnrollment.status == "active",
-                EmailCampaignEnrollment.next_run_at.isnot(None),
-                EmailCampaignEnrollment.next_run_at <= now,
+    for _ in range(limit):
+        with SessionLocal() as session:
+            query = (
+                session.query(EmailCampaignEnrollment)
+                .filter(
+                    EmailCampaignEnrollment.status == "active",
+                    EmailCampaignEnrollment.next_run_at.isnot(None),
+                    EmailCampaignEnrollment.next_run_at <= now,
+                )
+                .order_by(EmailCampaignEnrollment.next_run_at.asc())
             )
-            .order_by(EmailCampaignEnrollment.next_run_at.asc())
-            .limit(limit)
-            .all()
-        )
+            if processed_ids:
+                query = query.filter(
+                    ~EmailCampaignEnrollment.id.in_(processed_ids)
+                )
+            enr = query.with_for_update(skip_locked=True).first()
+            if not enr:
+                break
 
-        for enr in due:
             stats["processed"] += 1
+            enrollment_id = enr.id
+            processed_ids.add(enrollment_id)
             try:
                 outcome = _process_one(session, enr, now)
+                session.commit()
                 stats[outcome] = stats.get(outcome, 0) + 1
             except Exception as e:
+                session.rollback()
                 logger.error(
-                    "Campaign enrollment %s failed: %s", enr.id, e, exc_info=True
+                    "Campaign enrollment %s failed: %s",
+                    enrollment_id,
+                    e,
+                    exc_info=True,
                 )
                 stats["errors"] += 1
-                enr.updated_at = _utcnow()
-                # push next attempt 1h later to avoid tight error loops
-                enr.next_run_at = now + timedelta(hours=1)
-
-        session.commit()
+                failed = session.get(EmailCampaignEnrollment, enrollment_id)
+                if failed and failed.status == "active":
+                    failed.updated_at = _utcnow()
+                    # push next attempt 1h later to avoid tight error loops
+                    failed.next_run_at = now + timedelta(hours=1)
+                    session.commit()
 
     logger.info("Campaign tick: %s", stats)
     return stats
+
+
+def _delivery_idempotency_key(
+    enrollment: EmailCampaignEnrollment,
+    step_position: int,
+) -> str:
+    """Build the provider key from the persisted enrollment-run identity."""
+    return (
+        f"campaign-{enrollment.campaign_id}-enrollment-{enrollment.id}"
+        f"-run-{enrollment.delivery_run_id}-step-{step_position}"
+    )
+
+
+def _get_or_create_delivery_attempt(
+    session,
+    enrollment: EmailCampaignEnrollment,
+    step_position: int,
+    now: datetime,
+) -> EmailCampaignDeliveryAttempt:
+    """Return the one durable attempt for this enrollment run and step."""
+    if not enrollment.delivery_run_id:
+        # Backward compatibility for an enrollment created before migration 0012.
+        enrollment.delivery_run_id = _new_delivery_run_id()
+
+    attempt = (
+        session.query(EmailCampaignDeliveryAttempt)
+        .filter(
+            EmailCampaignDeliveryAttempt.campaign_id == enrollment.campaign_id,
+            EmailCampaignDeliveryAttempt.enrollment_id == enrollment.id,
+            EmailCampaignDeliveryAttempt.delivery_run_id
+            == enrollment.delivery_run_id,
+            EmailCampaignDeliveryAttempt.step_position == step_position,
+        )
+        .first()
+    )
+    if attempt:
+        return attempt
+
+    attempt = EmailCampaignDeliveryAttempt(
+        enrollment_id=enrollment.id,
+        campaign_id=enrollment.campaign_id,
+        client_id=enrollment.client_id,
+        delivery_run_id=enrollment.delivery_run_id,
+        step_position=step_position,
+        idempotency_key=_delivery_idempotency_key(enrollment, step_position),
+        state="pending",
+        attempt_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(attempt)
+    session.flush()
+    return attempt
+
+
+def _claim_delivery_attempt(
+    session,
+    enrollment: EmailCampaignEnrollment,
+    step_position: int,
+    now: datetime,
+) -> tuple[EmailCampaignDeliveryAttempt, bool]:
+    """Commit the send identity before provider I/O; return sent-state flag."""
+    attempt = _get_or_create_delivery_attempt(
+        session,
+        enrollment,
+        step_position,
+        now,
+    )
+    if attempt.state == "sent":
+        return attempt, True
+
+    attempt.state = "sending"
+    attempt.attempt_count = (attempt.attempt_count or 0) + 1
+    attempt.last_error = None
+    attempt.updated_at = now
+    enrollment.next_run_at = now + timedelta(hours=1)
+    enrollment.updated_at = now
+    session.commit()
+    return attempt, False
+
+
+def _advance_enrollment_after_send(
+    enrollment: EmailCampaignEnrollment,
+    step_map: dict[int, EmailCampaignStep],
+    now: datetime,
+) -> None:
+    enrollment.last_sent_at = now
+    enrollment.updated_at = now
+    next_pos = enrollment.current_step + 1
+    next_step = step_map.get(next_pos)
+    if next_step is None:
+        enrollment.status = "completed"
+        enrollment.current_step = next_pos
+        enrollment.next_run_at = None
+    else:
+        enrollment.current_step = next_pos
+        enrollment.next_run_at = now + timedelta(hours=next_step.delay_hours or 0)
 
 
 def _process_one(session, enr: EmailCampaignEnrollment, now: datetime) -> str:
@@ -652,6 +771,20 @@ def _process_one(session, enr: EmailCampaignEnrollment, now: datetime) -> str:
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
     }
 
+    attempt, already_sent = _claim_delivery_attempt(
+        session,
+        enr,
+        step.position,
+        now,
+    )
+    if already_sent:
+        # Defensive crash recovery: a committed completion is never sent again.
+        _advance_enrollment_after_send(enr, step_map, now)
+        return "skipped"
+
+    # Persist the durable execution identity before the provider request. The
+    # future due time prevents another worker from claiming it after this lock
+    # is released; a retry reuses attempt.idempotency_key.
     try:
         result = email_client.send_email(
             to=to_email,
@@ -669,11 +802,16 @@ def _process_one(session, enr: EmailCampaignEnrollment, now: datetime) -> str:
                 "enrollment_id": str(enr.id),
                 "step": str(step.position),
             },
+            idempotency_key=attempt.idempotency_key,
         )
     except EmailSendError as e:
         logger.error("Campaign send failed enrollment=%s: %s", enr.id, e)
+        attempt.state = "failed"
+        attempt.last_error = str(e)[:2000]
+        attempt.updated_at = _utcnow()
         enr.next_run_at = now + timedelta(hours=1)
         enr.updated_at = now
+        session.commit()
         return "errors"
 
     session.add(
@@ -705,17 +843,12 @@ def _process_one(session, enr: EmailCampaignEnrollment, now: datetime) -> str:
 
     log_usage(client.id, "email_sent", 0, 0.0)
 
-    enr.last_sent_at = now
-    enr.updated_at = now
-    next_pos = enr.current_step + 1
-    next_step = step_map.get(next_pos)
-    if next_step is None:
-        enr.status = "completed"
-        enr.current_step = next_pos
-        enr.next_run_at = None
-    else:
-        enr.current_step = next_pos
-        enr.next_run_at = now + timedelta(hours=next_step.delay_hours or 0)
+    attempt.state = "sent"
+    attempt.provider_message_id = result.provider_message_id
+    attempt.sent_at = now
+    attempt.updated_at = now
+    _advance_enrollment_after_send(enr, step_map, now)
+    session.commit()
 
     return "sent"
 

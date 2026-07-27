@@ -17,7 +17,7 @@ works against Postgres data with zero changes:
 from datetime import datetime, date as date_type
 from sqlalchemy import (
     Integer, String, Text, DateTime, Date, ForeignKey, Index, Boolean, Float,
-    UniqueConstraint, text,
+    CheckConstraint, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, Mapped, mapped_column
@@ -447,6 +447,7 @@ class EmailCampaignEnrollment(Base):
     current_step: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
+    delivery_run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     next_run_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -476,6 +477,71 @@ class EmailCampaignEnrollment(Base):
             f"<EmailCampaignEnrollment id={self.id} campaign={self.campaign_id} "
             f"lead={self.lead_id} status={self.status!r}>"
         )
+
+
+class EmailCampaignDeliveryAttempt(Base):
+    """Durable identity and state for one campaign enrollment step send."""
+    __tablename__ = "email_campaign_delivery_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enrollment_id: Mapped[int] = mapped_column(
+        ForeignKey("email_campaign_enrollments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("email_campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delivery_run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending", nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    provider_message_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "enrollment_id",
+            "delivery_run_id",
+            "step_position",
+            name="uq_email_delivery_attempt_execution",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_email_delivery_attempt_idempotency_key",
+        ),
+        CheckConstraint(
+            "state IN ('pending', 'sending', 'sent', 'failed')",
+            name="ck_email_delivery_attempt_state",
+        ),
+        Index(
+            "idx_email_delivery_attempt_enrollment",
+            "enrollment_id",
+            "delivery_run_id",
+        ),
+        Index("idx_email_delivery_attempt_client", "client_id"),
+    )
 
 
 class DailyStat(Base):
