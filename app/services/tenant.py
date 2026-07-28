@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
-from app.core.database import SessionLocal, is_configured
+from app.core import database
 from app.core.models import Client, PipelineStage
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def load_client(client_id: int) -> "Client | None":
       to the hardcoded defaults).
     - The client row doesn't exist yet.
     """
-    if not is_configured():
+    if not database.is_configured():
         logger.warning(
             f"Postgres not configured — client {client_id} config will use "
             "hardcoded defaults (airtable mode)."
@@ -52,7 +52,7 @@ def load_client(client_id: int) -> "Client | None":
         return None
 
     try:
-        with SessionLocal() as s:
+        with database.SessionLocal() as s:
             client = s.execute(
                 select(Client).where(Client.id == client_id)
             ).scalar_one_or_none()
@@ -97,10 +97,10 @@ def get_pipeline_stages(client_id: int) -> list:
     Return ordered PipelineStage rows for this client.
     Returns an empty list if Postgres is not configured.
     """
-    if not is_configured():
+    if not database.is_configured():
         return []
     try:
-        with SessionLocal() as s:
+        with database.SessionLocal() as s:
             rows = s.execute(
                 select(PipelineStage)
                 .where(PipelineStage.client_id == client_id)
@@ -165,14 +165,14 @@ def resolve_context_by_phone_id(wa_phone_number_id: str) -> ClientContext | None
     tenant. Returns None if Postgres is not configured or no active client
     matches the phone number ID.
     """
-    if not is_configured():
+    if not database.is_configured():
         logger.warning(
             "Postgres not configured — cannot resolve client by phone_number_id."
         )
         return None
 
     try:
-        with SessionLocal() as s:
+        with database.SessionLocal() as s:
             client = s.execute(
                 select(Client).where(
                     Client.wa_phone_number_id == wa_phone_number_id,
@@ -212,7 +212,7 @@ def resolve_context_by_api_key(raw_api_key: str) -> ClientContext | None:
     if not raw_api_key:
         return None
 
-    if not is_configured():
+    if not database.is_configured():
         logger.warning(
             "Postgres not configured — cannot resolve client by API key hash."
         )
@@ -221,7 +221,7 @@ def resolve_context_by_api_key(raw_api_key: str) -> ClientContext | None:
     key_hash = hashlib.sha256(raw_api_key.encode("utf-8")).hexdigest()
 
     try:
-        with SessionLocal() as s:
+        with database.SessionLocal() as s:
             client = s.execute(
                 select(Client).where(
                     Client.dashboard_api_key_hash == key_hash,
@@ -250,12 +250,12 @@ def get_all_active_clients() -> list[ClientContext]:
     Fetch all active clients from Postgres and return their contexts.
     Returns an empty list if Postgres is not configured.
     """
-    if not is_configured():
+    if not database.is_configured():
         logger.warning("Postgres not configured — cannot fetch active clients.")
         return []
 
     try:
-        with SessionLocal() as s:
+        with database.SessionLocal() as s:
             clients = s.execute(
                 select(Client).where(Client.is_active.is_(True))
             ).scalars().all()
