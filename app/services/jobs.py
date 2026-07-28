@@ -16,7 +16,7 @@ from app.clients.whatsapp_client import WhatsAppClient
 from app.clients.gemini_client import GeminiClient
 from app.store.store import get_store
 from app.services.guardrails import scan_input, redact_pii, score_confidence, CONFIDENCE_THRESHOLD
-from app.core.database import SessionLocal, is_configured
+from app.core import database
 from app.core.models import Lead, Client
 from app.services.rag import retrieve_context
 from app.services.usage import log_usage, estimate_tokens, check_limit, COST_PER_1K_INPUT_TOKENS, COST_PER_1K_OUTPUT_TOKENS
@@ -38,7 +38,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
 
     if not ctx:
-        if MIGRATION_MODE == "airtable" or not is_configured():
+        if MIGRATION_MODE == "airtable" or not database.is_configured():
             fallback_client = tenant.load_client(CLIENT_ID)
             req_gemini = tenant.get_gemini_for_client(fallback_client)
             req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
@@ -131,10 +131,12 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     # ── 4b2. Usage hard cap check ───────────────────────────────────────
     if current_client_id:
         plan = "base"
-        with SessionLocal() as session:
-            db_client = session.get(Client, int(current_client_id))
-            if db_client and db_client.plan_tier:
-                plan = db_client.plan_tier
+        session_factory = database.SessionLocal
+        if session_factory is not None:
+            with session_factory() as session:
+                db_client = session.get(Client, int(current_client_id))
+                if db_client and db_client.plan_tier:
+                    plan = db_client.plan_tier
         allowed, reason = check_limit(current_client_id, "ai_response", plan=plan)
         if not allowed:
             logger.warning(f"AI cap hit for client {current_client_id}, lead {sender_phone}: {reason}")
@@ -243,7 +245,7 @@ def process_status_update(
         ctx = tenant.resolve_context_by_phone_id(phone_number_id)
         if ctx:
             current_client_id = ctx.client.id
-        elif MIGRATION_MODE == "airtable" or not is_configured():
+        elif MIGRATION_MODE == "airtable" or not database.is_configured():
             current_client_id = CLIENT_ID
 
     if current_client_id is None:
@@ -284,7 +286,12 @@ def _run_analytics(
         numeric_score = score_data.get("score", 0)
         
         # Calculate derived string score based on threshold
-        with SessionLocal() as session:
+        session_factory = database.SessionLocal
+        if session_factory is None:
+            logger.debug("Postgres analytics skipped because the database is not configured")
+            return
+
+        with session_factory() as session:
             client = session.query(Client).filter(Client.id == current_client_id).first()
             lead = session.query(Lead).filter(Lead.phone == sender_phone, Lead.client_id == current_client_id).first()
             
