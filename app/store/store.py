@@ -123,13 +123,16 @@ class DualWriteStore:
         return self._primary.get_all_leads(client_id=client_id)
 
     def get_lead_by_id(self, record_id: str | int, client_id: int) -> dict | None:
-        return self._primary.get_lead_by_id(record_id, client_id=client_id)
+        return self._primary.get_lead_by_id(str(record_id), client_id=client_id)
 
     def get_messages_for_lead(self, lead_id: str | int, client_id: int) -> list:
         # Note: In DualWrite mode, reads still come from primary (Airtable), which doesn't support separate messages
         # When MIGRATION_MODE=postgres, this class isn't used, and DatabaseClient is the store.
         if hasattr(self._primary, "get_messages_for_lead"):
-            return self._primary.get_messages_for_lead(lead_id, client_id=client_id)
+            return self._primary.get_messages_for_lead(
+                str(lead_id),
+                client_id=client_id,
+            )
         return []
 
     # ── writes (both; secondary failures contained) ───────────────────────
@@ -183,14 +186,14 @@ class DualWriteStore:
 
     def update_lead_status_by_id(
         self,
-        record_id: str,
+        record_id: str | int,
         status: str,
         client_id: int,
     ) -> dict | None:
         if client_id is None:
             return None
         result = self._primary.update_lead_status_by_id(
-            record_id,
+            str(record_id),
             status,
             client_id=client_id,
         )
@@ -217,7 +220,7 @@ class DualWriteStore:
         if client_id is None:
             return None
         result = self._primary.update_human_takeover_by_id(
-            record_id,
+            str(record_id),
             enabled,
             client_id=client_id,
         )
@@ -361,7 +364,7 @@ class DualWriteStore:
 
 # ── module-level singleton, chosen at import time from MIGRATION_MODE ──────
 
-_store = None
+_store: LeadStore | None = None
 
 def get_primary_store():
     mode = (MIGRATION_MODE or "airtable").lower()

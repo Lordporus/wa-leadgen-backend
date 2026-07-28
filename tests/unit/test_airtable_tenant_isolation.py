@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 from app.clients.airtable_client import AirtableClient
@@ -31,7 +32,7 @@ def test_airtable_record_id_lookup_rejects_cross_tenant_before_network(monkeypat
 
 
 def test_airtable_cached_phone_lookup_is_scoped_by_configured_tenant(monkeypatch):
-    record = {
+    record: dict[str, Any] = {
         "id": "recCachedTenantA",
         "fields": {"Phone number type": "919999999999"},
     }
@@ -90,14 +91,14 @@ def test_airtable_writes_reject_cross_tenant_before_network(monkeypatch):
 
 def test_airtable_takeover_updates_only_owned_record(monkeypatch):
     client = _configured_airtable(client_id=1)
-    record = {
+    record: dict[str, Any] = {
         "id": "recTenantA",
         "fields": {
             "Phone number type": "919999999999",
             "is_human_takeover": False,
         },
     }
-    updated = {
+    updated: dict[str, Any] = {
         **record,
         "fields": {
             **record["fields"],

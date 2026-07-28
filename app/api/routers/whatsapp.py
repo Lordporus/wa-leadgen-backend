@@ -12,9 +12,9 @@ from app.core.config import (
 
 router = APIRouter()
 
-def verify_signature(payload: bytes, signature_header: str) -> bool:
+def verify_signature(payload: bytes, signature_header: str | None) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
-    if not signature_header:
+    if not WHATSAPP_APP_SECRET or not signature_header:
         return False
     expected_sig = hmac.new(
         WHATSAPP_APP_SECRET.encode('utf-8'),
@@ -36,11 +36,16 @@ def verify_webhook(request: Request, response: Response):
     challenge = request.query_params.get("hub.challenge")
 
     if mode and token:
-        if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
-            logger.info("Webhook verified successfully.")
-            return int(challenge)
-        else:
+        if mode != "subscribe" or token != WHATSAPP_VERIFY_TOKEN:
             raise HTTPException(status_code=403, detail="Verification token mismatch")
+        if challenge is None:
+            raise HTTPException(status_code=400, detail="Missing webhook challenge")
+        try:
+            parsed_challenge = int(challenge)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid webhook challenge")
+        logger.info("Webhook verified successfully.")
+        return parsed_challenge
 
     raise HTTPException(status_code=400, detail="Bad Request")
 
@@ -141,7 +146,7 @@ async def receive_message(request: Request, response: Response, background_tasks
     # 1. Verify signature
     signature = request.headers.get("X-Hub-Signature-256")
     body_bytes = await request.body()
-    if WHATSAPP_APP_SECRET and not verify_signature(body_bytes, signature):
+    if not verify_signature(body_bytes, signature):
         logger.warning("Invalid webhook signature rejected.")
         raise HTTPException(status_code=403, detail="Invalid signature")
 

@@ -92,8 +92,11 @@ def main() -> int:
             path.read_text(encoding="utf-8", errors="replace").splitlines(),
             start=1,
         ):
-            matches = [pattern.search(line) for pattern in PATTERNS]
-            matches = [match for match in matches if match is not None]
+            matches = [
+                match
+                for pattern in PATTERNS
+                if (match := pattern.search(line)) is not None
+            ]
             if matches:
                 unsafe = False
                 for match in matches:

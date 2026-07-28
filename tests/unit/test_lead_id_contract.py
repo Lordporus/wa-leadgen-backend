@@ -2,6 +2,7 @@ import inspect
 from contextlib import nullcontext
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -146,7 +147,7 @@ def test_airtable_backed_modes_list_detail_stage_use_same_id(monkeypatch, mode):
     active_store = (
         fake_store
         if mode == "airtable"
-        else DualWriteStore(fake_store, FakePostgresStore())
+        else DualWriteStore(cast(Any, fake_store), FakePostgresStore())
     )
     client = SimpleNamespace(id=1)
     monkeypatch.setattr(leads, "store", active_store)
@@ -525,6 +526,7 @@ def test_dual_legacy_numeric_id_is_scoped_and_logged(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         record = leads._store_record_for_lead_id("42", client_id=1)
 
+    assert record is not None
     assert record["id"] == "recOfflineLead"
     assert any(
         getattr(log_record, "event", None) == "legacy_lead_id_resolved"
@@ -537,7 +539,7 @@ def test_dual_legacy_numeric_id_is_scoped_and_logged(monkeypatch, caplog):
 def test_dual_stale_legacy_id_and_disabled_compatibility_fail_closed(monkeypatch):
     fake_store = FakeDualStore()
     get_lead = MagicMock(wraps=fake_store.get_lead)
-    fake_store.get_lead = get_lead
+    monkeypatch.setattr(fake_store, "get_lead", get_lead)
     monkeypatch.setattr(leads, "store", fake_store)
     monkeypatch.setattr(leads, "_is_postgres_store", lambda: False)
     monkeypatch.setattr(

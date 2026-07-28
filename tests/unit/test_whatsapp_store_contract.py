@@ -2,6 +2,7 @@ import ast
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -22,7 +23,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _dual_store():
-    record = {
+    record: dict[str, Any] = {
         "id": "recOffline",
         "fields": {
             "Name": "Offline Lead",
@@ -39,7 +40,7 @@ def _dual_store():
     primary.update_lead_status_by_id.return_value = record
     primary.append_message.return_value = True
     secondary = MagicMock()
-    secondary_record = {
+    secondary_record: dict[str, Any] = {
         "id": "42",
         "fields": {
             **record["fields"],

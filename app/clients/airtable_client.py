@@ -146,28 +146,33 @@ class AirtableClient:
 
     def update_lead_status_by_id(
         self,
-        record_id: str,
+        record_id: str | int,
         status: str,
         client_id: int,
     ) -> dict | None:
         """Update a record only when it belongs to this configured tenant."""
-        if not self.get_lead_by_id(record_id, client_id=client_id):
+        normalized_record_id = str(record_id)
+        if not self.get_lead_by_id(normalized_record_id, client_id=client_id):
             return None
-        updated = self._update(record_id, {"Status": status})
+        updated = self._update(normalized_record_id, {"Status": status})
         if updated:
             logger.info(f"Status updated → {status}: record {record_id}")
         return updated
 
     def update_human_takeover_by_id(
         self,
-        record_id: str,
+        record_id: str | int,
         enabled: bool,
         client_id: int,
     ) -> dict | None:
         """Update takeover state only for a record owned by this tenant."""
-        if not self.get_lead_by_id(record_id, client_id=client_id):
+        normalized_record_id = str(record_id)
+        if not self.get_lead_by_id(normalized_record_id, client_id=client_id):
             return None
-        return self._update(record_id, {"is_human_takeover": enabled})
+        return self._update(
+            normalized_record_id,
+            {"is_human_takeover": enabled},
+        )
 
     def get_all_leads(self, client_id: int) -> list:
         """Return all records from this tenant's configured leads table."""
@@ -180,13 +185,17 @@ class AirtableClient:
         return self._search("{Status}='Contacted'", client_id=client_id)
 
 
-    def get_lead_by_id(self, record_id: str, client_id: int) -> dict | None:
+    def get_lead_by_id(
+        self,
+        record_id: str | int,
+        client_id: int,
+    ) -> dict | None:
         """Return a record only for this configured tenant."""
         if not self.ok or not self._owns_tenant(client_id):
             return None
         try:
             resp = requests.get(
-                f"{self.base_url}/{record_id}",
+                f"{self.base_url}/{str(record_id)}",
                 headers=self.headers,
                 timeout=10,
             )
@@ -196,7 +205,11 @@ class AirtableClient:
             logger.error(f"Airtable get_by_id error: {e}")
             return None
 
-    def get_messages_for_lead(self, lead_id: str, client_id: int) -> list:
+    def get_messages_for_lead(
+        self,
+        lead_id: str | int,
+        client_id: int,
+    ) -> list:
         # Airtable doesn't store separate message rows. Messages are parsed from the Lead's Last_Message field.
         if not self._owns_tenant(client_id):
             return []

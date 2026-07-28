@@ -19,6 +19,7 @@ NOTE on field naming: the Airtable column is literally named "Phone number type"
 
 import logging
 from datetime import datetime
+from typing import Any
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -41,7 +42,7 @@ class _TableShim:
     def __init__(self, client: "DatabaseClient"):
         self._client = client
 
-    def create(self, fields: dict) -> dict | None:
+    def create(self, fields: dict[str, Any]) -> dict | None:
         return self._client._create_from_fields(fields)
 
 
@@ -81,7 +82,7 @@ class DatabaseClient:
     def _record(self, lead: Lead) -> dict:
         return {"id": str(lead.id), "fields": self._to_fields(lead)}
 
-    def _create_from_fields(self, fields: dict) -> dict | None:
+    def _create_from_fields(self, fields: dict[str, Any]) -> dict | None:
         """
         Used by the `.table.create()` shim. Accepts an Airtable-style fields
         dict and writes it as a lead (+ optional seed message in Last_Message).
@@ -91,13 +92,22 @@ class DatabaseClient:
             logger.error("Cannot create lead: missing phone in fields.")
             return None
 
-        cid = fields.get("client_id")
-        name = fields.get("Name", "WhatsApp User")
+        raw_client_id = fields.get("client_id")
+        if raw_client_id is None:
+            logger.error("Cannot create lead: missing or invalid client_id.")
+            return None
+        try:
+            client_id = int(raw_client_id)
+        except (TypeError, ValueError):
+            logger.error("Cannot create lead: missing or invalid client_id.")
+            return None
+        name = str(fields.get("Name") or "WhatsApp User")
+        source = str(fields.get("Source") or "Google Maps - Gurugram")
         record = self.add_lead(
             name=name,
-            phone=phone,
-            client_id=cid,
-            source=fields.get("Source", "Google Maps - Gurugram"),
+            phone=str(phone),
+            client_id=client_id,
+            source=source,
         )
         if not record:
             return None
@@ -105,13 +115,30 @@ class DatabaseClient:
         # If a seed Last_Message blob was passed (scraper context line), persist it
         seed = fields.get("Last_Message")
         if seed:
-            self.append_message(phone, direction="system", message=seed, msg_type="system", client_id=cid)
+            self.append_message(
+                str(phone),
+                direction="system",
+                message=str(seed),
+                msg_type="system",
+                client_id=client_id,
+            )
 
         # Honour explicit Status/Business_Name if provided (scraper sets Business_Name)
-        if fields.get("Business_Name") and fields.get("Business_Name") != name:
-            self.update_lead_info(phone, name=None, business_name=fields.get("Business_Name"), client_id=cid)
-        if fields.get("Status") and fields.get("Status") != "New Lead":
-            self.update_lead_status(phone, fields.get("Status"), client_id=cid)
+        business_name = fields.get("Business_Name")
+        if business_name and business_name != name:
+            self.update_lead_info(
+                str(phone),
+                name=None,
+                business_name=str(business_name),
+                client_id=client_id,
+            )
+        status = fields.get("Status")
+        if status and status != "New Lead":
+            self.update_lead_status(
+                str(phone),
+                str(status),
+                client_id=client_id,
+            )
 
         return record
 
@@ -165,30 +192,41 @@ class DatabaseClient:
             logger.error(f"Postgres get_lead error: {e}")
             return None
 
-    def get_lead_by_id(self, lead_id: int, client_id: int) -> dict | None:
+    def get_lead_by_id(self, lead_id: str | int, client_id: int) -> dict | None:
         """Return the first record matching this ID within a tenant, or None."""
         if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
                 row = s.execute(
-                    select(Lead).where(Lead.id == lead_id, Lead.client_id == client_id)
+                    select(Lead).where(
+                        Lead.id == int(lead_id),
+                        Lead.client_id == client_id,
+                    )
                 ).scalar_one_or_none()
                 return self._record(row) if row else None
-        except SQLAlchemyError as e:
+        except (SQLAlchemyError, ValueError) as e:
             logger.error(f"Postgres get_lead_by_id error: {e}")
             return None
 
-    def get_messages_for_lead(self, lead_id: int, client_id: int) -> list[dict]:
+    def get_messages_for_lead(
+        self,
+        lead_id: str | int,
+        client_id: int,
+    ) -> list[dict]:
         """Fetch all messages for a lead, scoping by client_id for tenant isolation."""
         if not self.ok or client_id is None:
             return []
         try:
             with self._session() as s:
+                normalized_lead_id = int(lead_id)
                 rows = s.execute(
                     select(Message)
                     .join(Lead, Message.lead_id == Lead.id)
-                    .where(Message.lead_id == lead_id, Lead.client_id == client_id)
+                    .where(
+                        Message.lead_id == normalized_lead_id,
+                        Lead.client_id == client_id,
+                    )
                     .order_by(Message.created_at.asc())
                 ).scalars().all()
                 return [
@@ -251,7 +289,12 @@ class DatabaseClient:
             logger.error(f"Postgres add_lead error: {e}")
             return None
 
-    def update_lead_status_by_id(self, record_id: str, status: str, client_id: int) -> dict | None:
+    def update_lead_status_by_id(
+        self,
+        record_id: str | int,
+        status: str,
+        client_id: int,
+    ) -> dict | None:
         """Update lead status using its primary key, scoped to tenant."""
         if not self.ok or client_id is None:
             return None
@@ -290,7 +333,7 @@ class DatabaseClient:
                 s.refresh(row)
                 logger.info(f"Status updated → {status}: {phone}")
                 return self._record(row)
-        except SQLAlchemyError as e:
+        except (SQLAlchemyError, ValueError) as e:
             logger.error(f"Postgres update_lead_status error: {e}")
             return None
 

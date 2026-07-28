@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import inspect
 import json
+from urllib.parse import urlencode
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request, Response
@@ -10,10 +11,16 @@ from fastapi import BackgroundTasks, HTTPException, Request, Response
 from app.api.routers import whatsapp as whatsapp_router
 
 
+def _app_secret() -> str:
+    value = whatsapp_router.WHATSAPP_APP_SECRET
+    assert value
+    return value
+
+
 def _signed_request(payload: dict) -> Request:
     body = json.dumps(payload, separators=(",", ":")).encode()
     signature = hmac.new(
-        whatsapp_router.WHATSAPP_APP_SECRET.encode(),
+        _app_secret().encode(),
         body,
         hashlib.sha256,
     ).hexdigest()
@@ -50,7 +57,7 @@ def _call_webhook(payload: dict):
 def test_signature_verification_accepts_valid_and_rejects_invalid():
     body = b'{"object":"whatsapp_business_account"}'
     digest = hmac.new(
-        whatsapp_router.WHATSAPP_APP_SECRET.encode(),
+        _app_secret().encode(),
         body,
         hashlib.sha256,
     ).hexdigest()
@@ -58,6 +65,39 @@ def test_signature_verification_accepts_valid_and_rejects_invalid():
     assert whatsapp_router.verify_signature(body, f"sha256={digest}") is True
     assert whatsapp_router.verify_signature(body, "sha256=invalid") is False
     assert whatsapp_router.verify_signature(body, "") is False
+
+
+def test_missing_signature_or_secret_fails_closed(monkeypatch):
+    body = b'{"object":"whatsapp_business_account"}'
+    assert whatsapp_router.verify_signature(body, None) is False
+
+    monkeypatch.setattr(whatsapp_router, "WHATSAPP_APP_SECRET", None)
+    assert whatsapp_router.verify_signature(body, "sha256=unused") is False
+
+
+@pytest.mark.parametrize("challenge", [None, "not-an-integer"])
+def test_webhook_verification_rejects_malformed_challenge(challenge):
+    query = {
+        "hub.mode": "subscribe",
+        "hub.verify_token": whatsapp_router.WHATSAPP_VERIFY_TOKEN,
+    }
+    if challenge is not None:
+        query["hub.challenge"] = challenge
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/webhook",
+            "query_string": urlencode(query).encode(),
+            "headers": [],
+        }
+    )
+    endpoint = inspect.unwrap(whatsapp_router.verify_webhook)
+
+    with pytest.raises(HTTPException) as error:
+        endpoint(request, Response())
+
+    assert error.value.status_code == 400
 
 
 def test_invalid_webhook_signature_fails_closed():

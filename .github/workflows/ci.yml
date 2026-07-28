@@ -93,6 +93,7 @@ jobs:
             exit 1
           fi
 
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
           git diff --diff-filter=ACMR --name-only -z \
             "$base_sha" HEAD -- '*.py' \
             > "$RUNNER_TEMP/changed-python-files"
@@ -103,22 +104,11 @@ jobs:
             echo "has_files=false" >> "$GITHUB_OUTPUT"
             echo "No changed Python files; Ruff and Mypy will be skipped."
           fi
-      - name: Ruff lint changed Python files
+      - name: Ruff and Mypy new-diagnostic gate
         if: steps.changed-python.outputs.has_files == 'true'
-        shell: bash
-        run: |
-          mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
-          python -m ruff check "${files[@]}"
-      - name: Mypy check changed Python files
-        if: ${{ always() && steps.changed-python.outputs.has_files == 'true' }}
-        shell: bash
-        run: |
-          mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
-          python -m mypy \
-            --follow-imports=silent \
-            --check-untyped-defs \
-            --show-error-codes \
-            "${files[@]}"
+        run: >-
+          python scripts/ci_quality_diff.py
+          --base "${{ steps.changed-python.outputs.base_sha }}"
   secret-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
