@@ -16,7 +16,7 @@ from app.clients.whatsapp_client import WhatsAppClient
 from app.clients.gemini_client import GeminiClient
 from app.store.store import get_store
 from app.services.guardrails import scan_input, redact_pii, score_confidence, CONFIDENCE_THRESHOLD
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, is_configured
 from app.core.models import Lead, Client
 from app.services.rag import retrieve_context
 from app.services.usage import log_usage, estimate_tokens, check_limit, COST_PER_1K_INPUT_TOKENS, COST_PER_1K_OUTPUT_TOKENS
@@ -38,7 +38,7 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
 
     if not ctx:
-        if MIGRATION_MODE == "airtable" or not tenant.is_configured():
+        if MIGRATION_MODE == "airtable" or not is_configured():
             fallback_client = tenant.load_client(CLIENT_ID)
             req_gemini = tenant.get_gemini_for_client(fallback_client)
             req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
@@ -56,6 +56,10 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     sender_phone = message_data.get("from")
     message_type = message_data.get("type")
     msg_id = message_data.get("id", "")
+
+    if not isinstance(sender_phone, str) or not sender_phone.strip():
+        logger.warning("WhatsApp message skipped without a valid sender")
+        return
 
     # ── 2. LORD phone loop guard ─────────────────────────────────────────
     normalized_sender = sender_phone.replace('+', '').replace(' ', '').replace('-', '') if sender_phone else ''
@@ -144,6 +148,9 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     # ── 4c. Input guardrails ─────────────────────────────────────────────
     is_safe, refusal = scan_input(user_text)
     if not is_safe:
+        if refusal is None:
+            logger.error("Input guardrail blocked content without a refusal message")
+            return
         logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
         wamid = whatsapp.send_message(sender_phone, refusal)
         store.append_message(
@@ -236,7 +243,7 @@ def process_status_update(
         ctx = tenant.resolve_context_by_phone_id(phone_number_id)
         if ctx:
             current_client_id = ctx.client.id
-        elif MIGRATION_MODE == "airtable" or not tenant.is_configured():
+        elif MIGRATION_MODE == "airtable" or not is_configured():
             current_client_id = CLIENT_ID
 
     if current_client_id is None:

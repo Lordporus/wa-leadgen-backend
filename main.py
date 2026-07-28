@@ -32,6 +32,7 @@ from app.core.config import (
     LORD_PHONE_NUMBER,
     WHATSAPP_APP_SECRET,
 )
+from app.core.database import is_configured
 from app.services import analytics as analytics_service
 from app.services import tenant
 
@@ -121,7 +122,7 @@ def calendly_sync_job():
                 )
                 
                 admin_phone = LORD_PHONE_NUMBER
-                if tenant.is_configured():
+                if is_configured():
                     client_row = tenant.load_client(matched_client_id)
                     if client_row and client_row.admin_phone:
                         admin_phone = client_row.admin_phone
