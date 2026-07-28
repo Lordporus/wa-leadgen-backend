@@ -27,6 +27,7 @@ from app.api.routers import (
 )
 from app.api.runtime import calendly, logger, store, whatsapp
 from app.core.config import (
+    CLIENT_ID,
     FOLLOWUP_TEMPLATE_NAME,
     LORD_PHONE_NUMBER,
     WHATSAPP_APP_SECRET,
@@ -42,7 +43,10 @@ def follow_up_job():
     if not clients:
         # Fallback for when Postgres isn't configured (airtable mode)
         logger.info("No active clients found (Postgres not configured), running in single-tenant mode.")
-        _process_followups_for_client(client_id=1, template_name=FOLLOWUP_TEMPLATE_NAME)
+        _process_followups_for_client(
+            client_id=CLIENT_ID,
+            template_name=FOLLOWUP_TEMPLATE_NAME,
+        )
         return
 
     for ctx in clients:
@@ -74,7 +78,9 @@ def _process_followups_for_client(client_id: int, template_name: str):
                     logger.info(f"Follow-up eligible: {phone} (Client {client_id}). Sending template '{template_name}'.")
                     whatsapp.send_template(phone, template_name)
                     store.append_message(phone, direction="outbound",
-                                         message=f"[template: {template_name}]", msg_type="template")
+                                         message=f"[template: {template_name}]",
+                                         msg_type="template",
+                                         client_id=client_id)
                 else:
                     logger.info(
                         f"[DRY-RUN] Lead {phone} (Client {client_id}) eligible for follow-up (Contacted > 48h). "
@@ -96,17 +102,27 @@ def calendly_sync_job():
             logger.info(f"Unmatched booking (no phone provided): {booking.get('name')}")
             continue
             
-        lead = store.get_lead(phone)
+        lead = store.get_lead(phone, client_id=CLIENT_ID)
         if lead:
+            matched_client_id = lead.get("fields", {}).get("client_id") or CLIENT_ID
             current_status = lead.get("fields", {}).get("Status")
             if current_status not in ("Booked", "Lost"):
-                store.update_lead_status(phone, "Booked")
-                store.append_message(phone, "system", f"Calendly Booking Confirmed for {booking.get('start_time')}", "system")
+                store.update_lead_status(
+                    phone,
+                    "Booked",
+                    client_id=matched_client_id,
+                )
+                store.append_message(
+                    phone,
+                    "system",
+                    f"Calendly Booking Confirmed for {booking.get('start_time')}",
+                    "system",
+                    client_id=matched_client_id,
+                )
                 
                 admin_phone = LORD_PHONE_NUMBER
                 if tenant.is_configured():
-                    client_id = lead.get("fields", {}).get("client_id", 1)
-                    client_row = tenant.load_client(client_id)
+                    client_row = tenant.load_client(matched_client_id)
                     if client_row and client_row.admin_phone:
                         admin_phone = client_row.admin_phone
                         

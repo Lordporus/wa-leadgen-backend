@@ -123,7 +123,7 @@ class DatabaseClient:
         this codebase: `{Status}='<value>'`. Anything else → returns all leads
         (safe fallback for the caller's subsequent in-Python filtering).
         """
-        if not self.ok:
+        if not self.ok or client_id is None:
             return []
         status_val = _parse_status_formula(formula)
         try:
@@ -139,7 +139,7 @@ class DatabaseClient:
 
     def get_all_leads(self, client_id: int) -> list:
         """Return all leads scoped by client_id."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return []
         try:
             with self._session() as s:
@@ -153,7 +153,7 @@ class DatabaseClient:
 
     def get_lead(self, phone: str, client_id: int) -> dict | None:
         """Return the first record matching this phone within a tenant, or None."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
@@ -167,7 +167,7 @@ class DatabaseClient:
 
     def get_lead_by_id(self, lead_id: int, client_id: int) -> dict | None:
         """Return the first record matching this ID within a tenant, or None."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
@@ -181,7 +181,7 @@ class DatabaseClient:
 
     def get_messages_for_lead(self, lead_id: int, client_id: int) -> list[dict]:
         """Fetch all messages for a lead, scoping by client_id for tenant isolation."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return []
         try:
             with self._session() as s:
@@ -209,7 +209,7 @@ class DatabaseClient:
 
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         """Return leads with status 'Contacted' for a specific client."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return []
         try:
             with self._session() as s:
@@ -221,9 +221,16 @@ class DatabaseClient:
             logger.error(f"Postgres get_contacted_leads error: {e}")
             return []
 
-    def add_lead(self, name: str, phone: str, client_id: int, source: str = "Apify - Google Maps") -> dict | None:
+    def add_lead(
+        self,
+        name: str,
+        phone: str,
+        source: str = "Apify - Google Maps",
+        *,
+        client_id: int,
+    ) -> dict | None:
         """Create a new lead record. No-op if the phone already exists for this tenant."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
@@ -246,7 +253,7 @@ class DatabaseClient:
 
     def update_lead_status_by_id(self, record_id: str, status: str, client_id: int) -> dict | None:
         """Update lead status using its primary key, scoped to tenant."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
@@ -267,7 +274,7 @@ class DatabaseClient:
 
     def update_lead_status(self, phone: str, status: str, client_id: int) -> dict | None:
         """Find lead by phone within tenant and update its Status field."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
@@ -287,17 +294,57 @@ class DatabaseClient:
             logger.error(f"Postgres update_lead_status error: {e}")
             return None
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None, client_id: int | None = None) -> bool:
+    def update_human_takeover_by_id(
+        self,
+        record_id: str | int,
+        enabled: bool,
+        client_id: int,
+    ) -> dict | None:
+        """Update takeover state by primary key within one tenant."""
+        if not self.ok or client_id is None:
+            return None
+        try:
+            with self._session() as s:
+                row = s.execute(
+                    select(Lead).where(
+                        Lead.id == int(record_id),
+                        Lead.client_id == client_id,
+                    )
+                ).scalar_one_or_none()
+                if not row:
+                    return None
+                row.is_human_takeover = enabled
+                row.updated_at = datetime.utcnow()
+                s.commit()
+                s.refresh(row)
+                return self._record(row)
+        except (SQLAlchemyError, ValueError) as e:
+            logger.error(f"Postgres update_human_takeover_by_id error: {e}")
+            return None
+
+    def append_message(
+        self,
+        phone: str,
+        direction: str,
+        message: str,
+        msg_type: str = "text",
+        wa_message_id: str | None = None,
+        *,
+        client_id: int,
+    ) -> bool:
         """Append a message row for this lead (tenant-scoped). Returns False on duplicate wamid."""
         if not self.ok:
             return True
+        if client_id is None:
+            return False
 
         from sqlalchemy.exc import IntegrityError
         try:
             with self._session() as s:
-                q = select(Lead).where(Lead.phone == phone)
-                if client_id is not None:
-                    q = q.where(Lead.client_id == client_id)
+                q = select(Lead).where(
+                    Lead.phone == phone,
+                    Lead.client_id == client_id,
+                )
                 row = s.execute(q).scalar_one_or_none()
                 if not row:
                     return True
@@ -317,15 +364,22 @@ class DatabaseClient:
             logger.error(f"Postgres append_message error: {e}")
             return True
 
-    def update_lead_info(self, phone: str, name: str | None, business_name: str | None, client_id: int | None = None) -> None:
+    def update_lead_info(
+        self,
+        phone: str,
+        name: str | None,
+        business_name: str | None,
+        client_id: int,
+    ) -> None:
         """Update Name and/or Business_Name fields if values are provided (tenant-scoped)."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return
         try:
             with self._session() as s:
-                q = select(Lead).where(Lead.phone == phone)
-                if client_id is not None:
-                    q = q.where(Lead.client_id == client_id)
+                q = select(Lead).where(
+                    Lead.phone == phone,
+                    Lead.client_id == client_id,
+                )
                 row = s.execute(q).scalar_one_or_none()
                 if not row:
                     return
@@ -343,15 +397,25 @@ class DatabaseClient:
         except SQLAlchemyError as e:
             logger.error(f"Postgres update_lead_info error: {e}")
 
-    def update_message_status(self, wa_message_id: str, status: str, client_id: int | None = None) -> None:
+    def update_message_status(
+        self,
+        wa_message_id: str,
+        status: str,
+        client_id: int,
+    ) -> None:
         """Update delivery status of a WhatsApp message (tenant-scoped via Lead join)."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return
         try:
             with self._session() as s:
-                q = select(Message).where(Message.wa_message_id == wa_message_id)
-                if client_id is not None:
-                    q = q.join(Lead, Message.lead_id == Lead.id).where(Lead.client_id == client_id)
+                q = (
+                    select(Message)
+                    .join(Lead, Message.lead_id == Lead.id)
+                    .where(
+                        Message.wa_message_id == wa_message_id,
+                        Lead.client_id == client_id,
+                    )
+                )
                 row = s.execute(q).scalar_one_or_none()
                 if row:
                     row.status = status
@@ -360,15 +424,16 @@ class DatabaseClient:
         except SQLAlchemyError as e:
             logger.error(f"Postgres update_message_status error: {e}")
 
-    def update_lead_score(self, phone: str, score: str, client_id: int | None = None) -> None:
+    def update_lead_score(self, phone: str, score: str, client_id: int) -> None:
         """Update Lead_Score field (tenant-scoped)."""
-        if not self.ok:
+        if not self.ok or client_id is None:
             return
         try:
             with self._session() as s:
-                q = select(Lead).where(Lead.phone == phone)
-                if client_id is not None:
-                    q = q.where(Lead.client_id == client_id)
+                q = select(Lead).where(
+                    Lead.phone == phone,
+                    Lead.client_id == client_id,
+                )
                 row = s.execute(q).scalar_one_or_none()
                 if not row:
                     return

@@ -6,6 +6,7 @@ import argparse
 import logging
 from app.clients.airtable_client import AirtableClient
 from app.clients.whatsapp_client import WhatsAppClient
+from app.core.config import CLIENT_ID
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def main(live: bool):
             return
             
     # 2. Get New Leads
-    records = airtable._search("{Status}='New Lead'")
+    records = airtable._search("{Status}='New Lead'", client_id=CLIENT_ID)
     logger.info(f"Found {len(records)} New Leads.")
     
     for r in records:
@@ -41,7 +42,11 @@ def main(live: bool):
             logger.info(f"[LIVE] Sending {template_name} to {name} ({phone})")
             res = whatsapp.send_template(phone, template_name)
             if res:
-                airtable.update_lead_status(phone, "Contacted")
+                airtable.update_lead_status(
+                    phone,
+                    "Contacted",
+                    client_id=CLIENT_ID,
+                )
         else:
             logger.info(f"[DRY-RUN] Would send {template_name} to {name} ({phone}) and set Status = Contacted")
 

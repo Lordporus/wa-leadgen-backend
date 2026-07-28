@@ -1,8 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file for local development
-load_dotenv()
+# Test and CI processes must use only their explicit, offline environment.
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+if APP_ENV not in {"test", "ci"}:
+    load_dotenv()
 
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
@@ -33,6 +35,11 @@ LORD_PHONE_NUMBER = os.getenv("LORD_PHONE_NUMBER")
 #   "postgres"           → Postgres only            (post-cutover)
 MIGRATION_MODE = os.getenv("MIGRATION_MODE", "airtable")
 DATABASE_URL = os.getenv("DATABASE_URL")
+# Temporary Phase 1 rollback switch for cached numeric IDs in dual/Airtable
+# mode. Canonical IDs remain unchanged when this compatibility path is off.
+LEGACY_LEAD_ID_COMPAT_ENABLED = (
+    os.getenv("LEGACY_LEAD_ID_COMPAT_ENABLED", "true").lower() == "true"
+)
 
 # ── Phase 8: Multi-tenant SaaS ────────────────────────────────────────────
 # Per-service deployment model: each Render service has its own CLIENT_ID.

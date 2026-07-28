@@ -4,13 +4,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import logging
 from app.clients.airtable_client import AirtableClient
+from app.core.config import CLIENT_ID
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 def run_hygiene():
     airtable = AirtableClient()
-    records = airtable._search("NOT({Phone number type}='')")
+    records = airtable._search(
+        "NOT({Phone number type}='')",
+        client_id=CLIENT_ID,
+    )
     logger.info(f"Scanning {len(records)} records for hygiene...")
     
     seen_phones = {}

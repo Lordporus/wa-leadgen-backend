@@ -134,12 +134,11 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
         allowed, reason = check_limit(current_client_id, "ai_response", plan=plan)
         if not allowed:
             logger.warning(f"AI cap hit for client {current_client_id}, lead {sender_phone}: {reason}")
-            lead_id_int = int(lead.get("id", 0))
-            with SessionLocal() as session:
-                db_lead = session.get(Lead, lead_id_int)
-                if db_lead:
-                    db_lead.is_human_takeover = True
-                    session.commit()
+            store.update_human_takeover_by_id(
+                lead["id"],
+                True,
+                client_id=current_client_id,
+            )
             return
 
     # ── 4c. Input guardrails ─────────────────────────────────────────────
@@ -190,16 +189,15 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     system_prompt = getattr(req_gemini, "_system_prompt", None)
     confidence = score_confidence(ai_reply, system_prompt)
     if confidence < CONFIDENCE_THRESHOLD:
-        lead_id_int = int(lead.get("id", 0))
         logger.warning(
-            f"Low confidence ({confidence:.2f}) for lead {lead_id_int} ({sender_phone}) "
+            f"Low confidence ({confidence:.2f}) for tenant {current_client_id} "
             f"— triggering human takeover, AI reply withheld."
         )
-        with SessionLocal() as session:
-            db_lead = session.get(Lead, lead_id_int)
-            if db_lead:
-                db_lead.is_human_takeover = True
-                session.commit()
+        store.update_human_takeover_by_id(
+            lead["id"],
+            True,
+            client_id=current_client_id,
+        )
         return
 
     # ── 6. Send WhatsApp reply ───────────────────────────────────────────
@@ -228,8 +226,26 @@ def process_webhook_message(phone_number_id: str, message_data: dict):
     )
 
 
-def process_status_update(status_data: dict, current_client_id: int = None):
+def process_status_update(
+    status_data: dict,
+    current_client_id: int | None = None,
+    phone_number_id: str | None = None,
+):
     """Process a WhatsApp message status update (delivered/read)."""
+    if current_client_id is None and phone_number_id:
+        ctx = tenant.resolve_context_by_phone_id(phone_number_id)
+        if ctx:
+            current_client_id = ctx.client.id
+        elif MIGRATION_MODE == "airtable" or not tenant.is_configured():
+            current_client_id = CLIENT_ID
+
+    if current_client_id is None:
+        logger.warning(
+            "WhatsApp status update skipped without tenant context",
+            extra={"event": "status_update_missing_tenant"},
+        )
+        return
+
     store = get_store()
     wamid = status_data["id"]
     status_str = status_data["status"]
