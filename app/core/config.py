@@ -40,6 +40,12 @@ WHATSAPP_LOCAL_TEST_TENANT_FALLBACK = (
     os.getenv("WHATSAPP_LOCAL_TEST_TENANT_FALLBACK", "false").strip().lower()
     == "true"
 )
+# Phase 4: enable only after the additive dual_write_failures migration is
+# deployed. Logging remains active even while durable recording is disabled.
+DUAL_WRITE_FAILURE_RECORDING_ENABLED = (
+    os.getenv("DUAL_WRITE_FAILURE_RECORDING_ENABLED", "false").strip().lower()
+    == "true"
+)
 DATABASE_URL = os.getenv("DATABASE_URL")
 # Temporary Phase 1 rollback switch for cached numeric IDs in dual/Airtable
 # mode. Canonical IDs remain unchanged when this compatibility path is off.

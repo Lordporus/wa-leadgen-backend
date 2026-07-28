@@ -16,10 +16,16 @@ All three modes expose the identical public interface used by main.py/scraper.py
     update_lead_info, update_lead_score, _search, table.create()
 """
 
+import hashlib
 import logging
+from datetime import datetime
 from typing import Protocol
 
-from app.core.config import MIGRATION_MODE, DATABASE_URL
+from app.core.config import (
+    DATABASE_URL,
+    DUAL_WRITE_FAILURE_RECORDING_ENABLED,
+    MIGRATION_MODE,
+)
 from app.clients.airtable_client import AirtableClient
 
 logger = logging.getLogger(__name__)
@@ -157,6 +163,7 @@ class DualWriteStore:
             ),
             "add_lead",
             client_id,
+            reference=phone,
         )
         return result
 
@@ -181,6 +188,7 @@ class DualWriteStore:
             ),
             "update_lead_status",
             client_id,
+            reference=phone,
         )
         return result
 
@@ -207,6 +215,7 @@ class DualWriteStore:
                 ),
                 "update_lead_status_by_id",
                 client_id,
+                reference=phone,
             )
         return result
 
@@ -242,6 +251,7 @@ class DualWriteStore:
                 mirror_to_secondary,
                 "update_human_takeover_by_id",
                 client_id,
+                reference=phone,
             )
         return result
 
@@ -276,6 +286,7 @@ class DualWriteStore:
             ),
             "append_message",
             client_id,
+            reference=phone,
         )
         return result
 
@@ -296,6 +307,7 @@ class DualWriteStore:
             ),
             "update_message_status",
             client_id,
+            reference=wa_message_id,
         )
 
     def update_lead_info(
@@ -322,6 +334,7 @@ class DualWriteStore:
             ),
             "update_lead_info",
             client_id,
+            reference=phone,
         )
 
     def update_lead_score(
@@ -341,12 +354,13 @@ class DualWriteStore:
             ),
             "update_lead_score",
             client_id,
+            reference=phone,
         )
 
     # ── helper ────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _safe(fn, op: str, client_id: int):
+    def _safe(fn, op: str, client_id: int, *, reference: str | None = None):
         """Run a Postgres write; log and swallow any error."""
         try:
             fn()
@@ -360,6 +374,53 @@ class DualWriteStore:
                     "error_type": type(e).__name__,
                 },
             )
+            DualWriteStore._record_failure(
+                operation=op,
+                client_id=client_id,
+                reference=reference,
+                error=e,
+            )
+
+    @staticmethod
+    def _record_failure(*, operation: str, client_id: int, reference: str | None, error: Exception) -> None:
+        """Best-effort durable visibility; never affect Airtable-primary writes."""
+        if not DUAL_WRITE_FAILURE_RECORDING_ENABLED:
+            return
+        try:
+            from app.core import database
+            from app.core.models import DualWriteFailure
+
+            if not database.is_configured() or database.SessionLocal is None:
+                return
+            key_material = f"{client_id}:{operation}:{reference or ''}"
+            idempotency_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+            now = datetime.utcnow()
+            with database.SessionLocal() as session:
+                row = session.query(DualWriteFailure).filter(
+                    DualWriteFailure.idempotency_key == idempotency_key
+                ).one_or_none()
+                if row is None:
+                    session.add(DualWriteFailure(
+                        client_id=client_id,
+                        operation=operation,
+                        idempotency_key=idempotency_key,
+                        reference=reference,
+                        error_type=type(error).__name__,
+                        error_message=str(error)[:2000],
+                        attempt_count=1,
+                        first_failed_at=now,
+                        last_failed_at=now,
+                    ))
+                else:
+                    row.attempt_count += 1
+                    row.error_type = type(error).__name__
+                    row.error_message = str(error)[:2000]
+                    row.last_failed_at = now
+                    row.resolved_at = None
+                    row.resolution_note = None
+                session.commit()
+        except Exception:  # noqa: BLE001 - secondary visibility must be contained
+            logger.exception("[DualWrite] Failed to persist shadow-write failure")
 
 
 # ── module-level singleton, chosen at import time from MIGRATION_MODE ──────

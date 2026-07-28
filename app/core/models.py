@@ -243,6 +243,33 @@ Index("idx_messages_provider_message_id", Message.provider_message_id)
 Index("idx_messages_lead_channel", Message.lead_id, Message.channel)
 
 
+class DualWriteFailure(Base):
+    """Durable, tenant-scoped record of a contained Postgres shadow failure."""
+
+    __tablename__ = "dual_write_failures"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_dual_write_failures_idempotency_key"),
+        Index("idx_dual_write_failures_open", "client_id", "resolved_at", "last_failed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    last_failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    client: Mapped["Client"] = relationship()
+
+
 class PipelineStage(Base):
     """
     Phase 8 — per-client ordered pipeline stage.
