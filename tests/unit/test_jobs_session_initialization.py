@@ -27,7 +27,7 @@ def test_inbound_fallback_uses_session_factory_initialized_after_jobs_import(
         return initialized_factory()
 
     monkeypatch.setattr(database, "SessionLocal", tracking_session_factory)
-    monkeypatch.setattr(jobs, "MIGRATION_MODE", "airtable")
+    monkeypatch.setattr(jobs, "WHATSAPP_LOCAL_TEST_TENANT_FALLBACK", True)
     monkeypatch.setattr(jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: None)
     monkeypatch.setattr(jobs.tenant, "load_client", lambda _client_id: None)
     monkeypatch.setattr(jobs.tenant, "get_gemini_for_client", lambda _client: MagicMock())

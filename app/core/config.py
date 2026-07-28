@@ -34,6 +34,12 @@ LORD_PHONE_NUMBER = os.getenv("LORD_PHONE_NUMBER")
 #   "dual"               → write both, read Airtable (shadow phase)
 #   "postgres"           → Postgres only            (post-cutover)
 MIGRATION_MODE = os.getenv("MIGRATION_MODE", "airtable")
+# Never enable in deployed environments. This preserves isolated legacy
+# fixtures only; WhatsApp production jobs must resolve a tenant by phone ID.
+WHATSAPP_LOCAL_TEST_TENANT_FALLBACK = (
+    os.getenv("WHATSAPP_LOCAL_TEST_TENANT_FALLBACK", "false").strip().lower()
+    == "true"
+)
 DATABASE_URL = os.getenv("DATABASE_URL")
 # Temporary Phase 1 rollback switch for cached numeric IDs in dual/Airtable
 # mode. Canonical IDs remain unchanged when this compatibility path is off.

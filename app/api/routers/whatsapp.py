@@ -9,6 +9,7 @@ from app.core.config import (
     WHATSAPP_APP_SECRET,
     WHATSAPP_VERIFY_TOKEN,
 )
+from app.services import tenant
 
 router = APIRouter()
 
@@ -158,6 +159,21 @@ async def receive_message(request: Request, response: Response, background_tasks
                 value = change.get("value", {})
                 phone_number_id = value.get("metadata", {}).get("phone_number_id")
 
+                # Tenant routing is an ingress invariant: never let an
+                # unknown/inactive phone number reach deduplication, CRM, AI,
+                # provider, or background processing in dual/postgres mode.
+                # Airtable-only local deployments are the sole documented
+                # compatibility mode without database-backed phone routing.
+                tenant_context = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
+                if tenant_context is None:
+                    logger.warning(
+                        "WhatsApp webhook skipped for unknown or inactive phone_number_id",
+                        extra={"event": "unknown_tenant_phone_number"},
+                    )
+                    continue
+
+                current_client_id = tenant_context.client.id
+
                 if "messages" in value:
                     for message in value["messages"]:
                         msg_id = message.get("id", "")
@@ -174,7 +190,9 @@ async def receive_message(request: Request, response: Response, background_tasks
                             except Exception as e:
                                 logger.warning(f"Redis unavailable, skipping dedup check: {e}")
 
-                        # DB-level dedup fallback when Redis unavailable
+                        # DB-level dedup fallback when Redis unavailable.
+                        # The lookup is tenant-scoped so one tenant cannot
+                        # suppress another tenant's inbound provider event.
                         if msg_id:
                             try:
                                 from app.core.database import SessionLocal
@@ -182,7 +200,12 @@ async def receive_message(request: Request, response: Response, background_tasks
                                 from sqlalchemy import select
                                 with SessionLocal() as session:
                                     existing = session.execute(
-                                        select(Message).where(Message.wa_message_id == msg_id)
+                                        select(Message)
+                                        .join(Message.lead)
+                                        .where(
+                                            Message.wa_message_id == msg_id,
+                                            Message.lead.has(client_id=current_client_id),
+                                        )
                                     ).scalar_one_or_none()
                                     if existing:
                                         logger.info(f"Duplicate webhook deduped at DB | wamid: {msg_id}")
@@ -192,7 +215,12 @@ async def receive_message(request: Request, response: Response, background_tasks
 
                         # Use BackgroundTasks directly instead of RQ (since no worker is deployed yet)
                         from app.services.jobs import process_webhook_message
-                        background_tasks.add_task(process_webhook_message, phone_number_id=phone_number_id, message_data=message)
+                        background_tasks.add_task(
+                            process_webhook_message,
+                            phone_number_id=phone_number_id,
+                            message_data=message,
+                            current_client_id=current_client_id,
+                        )
 
                 if "statuses" in value:
                     for status in value["statuses"]:
@@ -201,6 +229,7 @@ async def receive_message(request: Request, response: Response, background_tasks
                             process_status_update,
                             status_data=status,
                             phone_number_id=phone_number_id,
+                            current_client_id=current_client_id,
                         )
 
         return {"status": "queued"}

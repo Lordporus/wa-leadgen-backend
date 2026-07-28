@@ -10,7 +10,8 @@ import logging
 from datetime import datetime
 
 from app.core.config import (
-    LORD_PHONE_NUMBER, BLOCKED_NUMBERS, MIGRATION_MODE, CLIENT_ID,
+    LORD_PHONE_NUMBER, BLOCKED_NUMBERS, CLIENT_ID,
+    WHATSAPP_LOCAL_TEST_TENANT_FALLBACK,
 )
 from app.clients.whatsapp_client import WhatsAppClient
 from app.clients.gemini_client import GeminiClient
@@ -27,31 +28,42 @@ logger = logging.getLogger(__name__)
 whatsapp = WhatsAppClient()
 
 
-def process_webhook_message(phone_number_id: str, message_data: dict):
+def process_webhook_message(
+    phone_number_id: str,
+    message_data: dict,
+    current_client_id: int | None = None,
+):
     """
     Process a single inbound WhatsApp message end-to-end:
     tenant resolution → lead CRUD → AI reply → send → analytics.
     """
-    store = get_store()
-
     # ── 1. Resolve tenant context ────────────────────────────────────────
     ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
 
+    if current_client_id is not None:
+        # The webhook resolved this immutable tenant ID at ingress. Re-resolve
+        # the phone ID here and reject a mismatch rather than trusting a stale
+        # or forged task payload.
+        if not ctx or ctx.client.id != current_client_id:
+            logger.warning("Webhook job skipped due to tenant context mismatch")
+            return
     if not ctx:
-        if MIGRATION_MODE == "airtable" or not database.is_configured():
+        if WHATSAPP_LOCAL_TEST_TENANT_FALLBACK:
             fallback_client = tenant.load_client(CLIENT_ID)
             req_gemini = tenant.get_gemini_for_client(fallback_client)
             req_won_stages = tenant.get_won_stage_names(CLIENT_ID)
             req_lost_stages = tenant.get_lost_stage_names(CLIENT_ID)
             current_client_id = CLIENT_ID
         else:
-            logger.warning(f"Unknown phone_number_id: {phone_number_id}")
+            logger.warning("Webhook job skipped without a verified tenant context")
             return
     else:
         req_gemini = ctx.gemini
         req_won_stages = ctx.won_stages
         req_lost_stages = ctx.lost_stages
         current_client_id = ctx.client.id
+
+    store = get_store()
 
     sender_phone = message_data.get("from")
     message_type = message_data.get("type")
@@ -241,12 +253,16 @@ def process_status_update(
     phone_number_id: str | None = None,
 ):
     """Process a WhatsApp message status update (delivered/read)."""
-    if current_client_id is None and phone_number_id:
-        ctx = tenant.resolve_context_by_phone_id(phone_number_id)
-        if ctx:
-            current_client_id = ctx.client.id
-        elif MIGRATION_MODE == "airtable" or not database.is_configured():
-            current_client_id = CLIENT_ID
+    ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
+
+    if current_client_id is not None:
+        if not ctx or ctx.client.id != current_client_id:
+            logger.warning("Status update skipped due to tenant context mismatch")
+            return
+    elif ctx:
+        current_client_id = ctx.client.id
+    elif WHATSAPP_LOCAL_TEST_TENANT_FALLBACK:
+        current_client_id = CLIENT_ID
 
     if current_client_id is None:
         logger.warning(
