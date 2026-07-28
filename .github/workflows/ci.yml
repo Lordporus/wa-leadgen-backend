@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   offline-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       APP_ENV: test
       AIRTABLE_API_KEY: ""
@@ -31,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11.9"
           cache: pip
       - name: Reject local environment files
         run: |
@@ -47,25 +52,79 @@ jobs:
 
   lint-type-import:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       APP_ENV: ci
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11.9"
           cache: pip
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Run dependency-free lint, type-contract, and import checks
-        run: python scripts/ci_static_checks.py
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Find changed Python files
+        id: changed-python
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+          else
+            base_sha="$PUSH_BASE_SHA"
+          fi
+
+          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            base_sha="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          git diff --diff-filter=ACMR --name-only -z \
+            "$base_sha" HEAD -- '*.py' \
+            > "$RUNNER_TEMP/changed-python-files"
+
+          if [[ -s "$RUNNER_TEMP/changed-python-files" ]]; then
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            echo "No changed Python files; Ruff and Mypy will be skipped."
+          fi
+      - name: Ruff lint changed Python files
+        if: steps.changed-python.outputs.has_files == 'true'
+        shell: bash
+        run: |
+          mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
+          python -m ruff check "${files[@]}"
+      - name: Mypy check changed Python files
+        if: steps.changed-python.outputs.has_files == 'true'
+        shell: bash
+        run: |
+          mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
+          python -m mypy \
+            --follow-imports=silent \
+            --check-untyped-defs \
+            --show-error-codes \
+            "${files[@]}"
+      - name: Import and store-contract checks
+        run: >-
+          python -c
+          "from scripts.ci_static_checks import check_imports_and_store_types;
+          check_imports_and_store_types()"
 
   secret-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11.9"
       - name: Scan tracked source without printing values
         run: python scripts/ci_secret_scan.py
