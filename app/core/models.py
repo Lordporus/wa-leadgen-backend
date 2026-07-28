@@ -33,6 +33,19 @@ class Client(Base):
              phone number ID, Calendly link and follow-up template.
     """
     __tablename__ = "clients"
+    __table_args__ = (
+        CheckConstraint(
+            "wa_phone_number_id IS NULL OR wa_phone_number_id = trim(wa_phone_number_id)",
+            name="ck_clients_wa_phone_number_id_trimmed",
+        ),
+        Index(
+            "uidx_clients_active_wa_phone",
+            "wa_phone_number_id",
+            unique=True,
+            postgresql_where=text("wa_phone_number_id IS NOT NULL AND is_active"),
+            sqlite_where=text("wa_phone_number_id IS NOT NULL AND is_active"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

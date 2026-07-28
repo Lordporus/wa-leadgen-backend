@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import selectinload
 
 from app.clients.airtable_client import AirtableClient
@@ -36,10 +37,37 @@ def _message_key(timestamp: datetime | str | None, direction: str, kind: str, bo
     return (str(timestamp or ""), direction.upper(), kind, body)
 
 
+def _database_identity(database_url: str) -> str:
+    """Return a non-secret identity used to reject the production database."""
+    try:
+        url = make_url(database_url)
+    except Exception as error:  # noqa: BLE001 - reject malformed write targets
+        raise RuntimeError("DATABASE_URL is invalid; refusing backfill write") from error
+    if not url.host or not url.database:
+        raise RuntimeError("DATABASE_URL must include host and database; refusing backfill write")
+    port = url.port or 5432
+    return f"{url.host.lower()}:{port}/{url.database}"
+
+
+def _validate_apply_target(database_url: str | None) -> None:
+    """Require an explicit staging acknowledgement and reject the production DB."""
+    if os.getenv("APP_ENV", "").strip().lower() != "staging":
+        raise RuntimeError("--apply is restricted to APP_ENV=staging")
+    if os.getenv("BACKFILL_APPLY_CONFIRMATION", "") != "staging-only":
+        raise RuntimeError("--apply requires BACKFILL_APPLY_CONFIRMATION=staging-only")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required for --apply")
+    production_identity = os.getenv("PRODUCTION_DATABASE_IDENTITY", "").strip().lower()
+    if not production_identity:
+        raise RuntimeError("--apply requires PRODUCTION_DATABASE_IDENTITY to protect production")
+    if _database_identity(database_url).lower() == production_identity:
+        raise RuntimeError("--apply refused: DATABASE_URL identifies the production database")
+
+
 def backfill(client_id: int, *, apply: bool = False, approved_test_record_ids: set[str] | None = None) -> dict[str, int]:
     """Plan by default; writes only to explicitly marked staging environments."""
-    if apply and os.getenv("APP_ENV", "").strip().lower() != "staging":
-        raise RuntimeError("--apply is restricted to APP_ENV=staging")
+    if apply:
+        _validate_apply_target(DATABASE_URL)
     database.init_engine(DATABASE_URL)
     airtable = AirtableClient()
     if not airtable.ok or airtable.client_id != client_id:

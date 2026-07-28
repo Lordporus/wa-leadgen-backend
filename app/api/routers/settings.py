@@ -84,7 +84,25 @@ def update_settings(request: Request, response: Response, body: SettingsUpdateBo
         if body.calendly_link is not None:
             db_client.calendly_link = body.calendly_link
         if body.wa_phone_number_id is not None:
-            db_client.wa_phone_number_id = body.wa_phone_number_id
+            phone_number_id = body.wa_phone_number_id.strip()
+            if not phone_number_id:
+                raise HTTPException(status_code=400, detail="wa_phone_number_id must not be blank")
+            if db_client.is_active:
+                already_assigned = (
+                    s.query(Client.id)
+                    .filter(
+                        Client.wa_phone_number_id == phone_number_id,
+                        Client.is_active.is_(True),
+                        Client.id != db_client.id,
+                    )
+                    .first()
+                )
+                if already_assigned:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="wa_phone_number_id is already assigned to an active tenant",
+                    )
+            db_client.wa_phone_number_id = phone_number_id
         if body.brand_color is not None:
             db_client.brand_color = body.brand_color.strip()
         if body.logo_url is not None:

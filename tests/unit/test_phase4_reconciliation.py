@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 from app.services.reconciliation import airtable_snapshot, classify_airtable_record, eligible_for_backfill, message_fingerprint, normalize_phone, normalize_timestamp, postgres_snapshot, reconcile
 from app.store.store import DualWriteStore
-from scripts.backfill_airtable_postgres import backfill
+from scripts.backfill_airtable_postgres import _validate_apply_target, backfill
 
 
 def test_reconciliation_normalizes_phone_and_reports_high_severity_mismatches():
@@ -69,6 +69,32 @@ def test_backfill_apply_is_staging_only(monkeypatch):
         assert "staging" in str(error)
     else:
         raise AssertionError("production backfill apply must be rejected")
+
+
+def test_backfill_apply_rejects_a_production_database_even_when_env_says_staging(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.setenv("BACKFILL_APPLY_CONFIRMATION", "staging-only")
+    monkeypatch.setenv("PRODUCTION_DATABASE_IDENTITY", "db.production.supabase.co:5432/postgres")
+
+    try:
+        _validate_apply_target("postgresql://user:secret@db.production.supabase.co:5432/postgres")
+    except RuntimeError as error:
+        assert "production database" in str(error)
+    else:
+        raise AssertionError("production database must be rejected even in a mislabelled staging environment")
+
+
+def test_backfill_apply_requires_explicit_staging_confirmation_and_production_identity(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.delenv("BACKFILL_APPLY_CONFIRMATION", raising=False)
+    monkeypatch.delenv("PRODUCTION_DATABASE_IDENTITY", raising=False)
+
+    try:
+        _validate_apply_target("postgresql://user:secret@db.staging.supabase.co:5432/postgres")
+    except RuntimeError as error:
+        assert "BACKFILL_APPLY_CONFIRMATION" in str(error)
+    else:
+        raise AssertionError("write confirmation must be required")
 
 
 def test_dual_write_failure_is_contained_and_reported(monkeypatch):
