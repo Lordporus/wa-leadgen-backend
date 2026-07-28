@@ -17,6 +17,7 @@ All three modes expose the identical public interface used by main.py/scraper.py
 """
 
 import logging
+from typing import Protocol
 
 from app.core.config import MIGRATION_MODE, DATABASE_URL
 from app.clients.airtable_client import AirtableClient
@@ -26,6 +27,67 @@ logger = logging.getLogger(__name__)
 # Initialise the Postgres engine once at import time (no-op if no DATABASE_URL).
 from app.core.database import init_engine
 init_engine(DATABASE_URL)
+
+
+class LeadStore(Protocol):
+    """Tenant-scoped store contract used by WhatsApp routes and jobs."""
+
+    def _search(self, formula: str, client_id: int) -> list: ...
+    def get_contacted_leads(self, client_id: int) -> list[dict]: ...
+    def get_lead(self, phone: str, client_id: int) -> dict | None: ...
+    def get_all_leads(self, client_id: int) -> list: ...
+    def get_lead_by_id(self, record_id: str | int, client_id: int) -> dict | None: ...
+    def get_messages_for_lead(self, lead_id: str | int, client_id: int) -> list: ...
+    def add_lead(
+        self,
+        name: str,
+        phone: str,
+        source: str = "Apify - Google Maps",
+        *,
+        client_id: int,
+    ) -> dict | None: ...
+    def update_lead_status(
+        self,
+        phone: str,
+        status: str,
+        client_id: int,
+    ) -> dict | None: ...
+    def update_lead_status_by_id(
+        self,
+        record_id: str | int,
+        status: str,
+        client_id: int,
+    ) -> dict | None: ...
+    def update_human_takeover_by_id(
+        self,
+        record_id: str | int,
+        enabled: bool,
+        client_id: int,
+    ) -> dict | None: ...
+    def append_message(
+        self,
+        phone: str,
+        direction: str,
+        message: str,
+        msg_type: str = "text",
+        wa_message_id: str | None = None,
+        *,
+        client_id: int,
+    ) -> bool: ...
+    def update_message_status(
+        self,
+        wa_message_id: str,
+        status: str,
+        client_id: int,
+    ) -> None: ...
+    def update_lead_info(
+        self,
+        phone: str,
+        name: str | None,
+        business_name: str | None,
+        client_id: int,
+    ) -> None: ...
+    def update_lead_score(self, phone: str, score: str, client_id: int) -> None: ...
 
 
 class DualWriteStore:
@@ -48,93 +110,261 @@ class DualWriteStore:
 
     # ── reads (primary only) ──────────────────────────────────────────────
 
-    def _search(self, formula: str, client_id=None) -> list:
+    def _search(self, formula: str, client_id: int) -> list:
         return self._primary._search(formula, client_id=client_id)
 
     def get_contacted_leads(self, client_id: int) -> list[dict]:
         return self._primary.get_contacted_leads(client_id)
 
-    def get_lead(self, phone: str, client_id: int | None = None) -> dict | None:
+    def get_lead(self, phone: str, client_id: int) -> dict | None:
         return self._primary.get_lead(phone, client_id=client_id)
 
-    def get_all_leads(self, client_id=None) -> list:
+    def get_all_leads(self, client_id: int) -> list:
         return self._primary.get_all_leads(client_id=client_id)
 
-    def get_lead_by_id(self, record_id: str | int, client_id: int | None = None) -> dict | None:
-        return self._primary.get_lead_by_id(record_id, client_id=client_id)
+    def get_lead_by_id(self, record_id: str | int, client_id: int) -> dict | None:
+        return self._primary.get_lead_by_id(str(record_id), client_id=client_id)
 
-    def get_messages_for_lead(self, lead_id: str | int, client_id: int | None = None) -> list:
+    def get_messages_for_lead(self, lead_id: str | int, client_id: int) -> list:
         # Note: In DualWrite mode, reads still come from primary (Airtable), which doesn't support separate messages
         # When MIGRATION_MODE=postgres, this class isn't used, and DatabaseClient is the store.
         if hasattr(self._primary, "get_messages_for_lead"):
-            return self._primary.get_messages_for_lead(lead_id, client_id=client_id)
+            return self._primary.get_messages_for_lead(
+                str(lead_id),
+                client_id=client_id,
+            )
         return []
 
     # ── writes (both; secondary failures contained) ───────────────────────
 
-    def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
-        result = self._primary.add_lead(name, phone, source)
-        self._safe(lambda: self._secondary.add_lead(name, phone, source), "add_lead", phone)
+    def add_lead(
+        self,
+        name: str,
+        phone: str,
+        source: str = "Apify - Google Maps",
+        *,
+        client_id: int,
+    ) -> dict | None:
+        if client_id is None:
+            return None
+        result = self._primary.add_lead(name, phone, source, client_id=client_id)
+        self._safe(
+            lambda: self._secondary.add_lead(
+                name,
+                phone,
+                source,
+                client_id=client_id,
+            ),
+            "add_lead",
+            client_id,
+        )
         return result
 
-    def update_lead_status(self, phone: str, status: str) -> dict | None:
-        result = self._primary.update_lead_status(phone, status)
-        self._safe(lambda: self._secondary.update_lead_status(phone, status), "update_lead_status", phone)
+    def update_lead_status(
+        self,
+        phone: str,
+        status: str,
+        client_id: int,
+    ) -> dict | None:
+        if client_id is None:
+            return None
+        result = self._primary.update_lead_status(
+            phone,
+            status,
+            client_id=client_id,
+        )
+        self._safe(
+            lambda: self._secondary.update_lead_status(
+                phone,
+                status,
+                client_id=client_id,
+            ),
+            "update_lead_status",
+            client_id,
+        )
         return result
 
     def update_lead_status_by_id(
         self,
-        record_id: str,
+        record_id: str | int,
         status: str,
-        client_id: int | None = None,
+        client_id: int,
     ) -> dict | None:
-        # Only primary — Postgres secondary doesn't track Airtable record IDs.
-        return self._primary.update_lead_status_by_id(
-            record_id,
+        if client_id is None:
+            return None
+        result = self._primary.update_lead_status_by_id(
+            str(record_id),
             status,
             client_id=client_id,
         )
+        phone = (result or {}).get("fields", {}).get("Phone number type")
+        if phone:
+            self._safe(
+                lambda: self._secondary.update_lead_status(
+                    phone,
+                    status,
+                    client_id=client_id,
+                ),
+                "update_lead_status_by_id",
+                client_id,
+            )
+        return result
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
-        result = self._primary.append_message(phone, direction, message, msg_type, wa_message_id)
+    def update_human_takeover_by_id(
+        self,
+        record_id: str | int,
+        enabled: bool,
+        client_id: int,
+    ) -> dict | None:
+        """Update the read-primary first, then mirror the same scoped lead."""
+        if client_id is None:
+            return None
+        result = self._primary.update_human_takeover_by_id(
+            str(record_id),
+            enabled,
+            client_id=client_id,
+        )
+        phone = (result or {}).get("fields", {}).get("Phone number type")
+        if phone:
+            def mirror_to_secondary():
+                secondary_record = self._secondary.get_lead(
+                    phone,
+                    client_id=client_id,
+                )
+                if secondary_record:
+                    self._secondary.update_human_takeover_by_id(
+                        secondary_record["id"],
+                        enabled,
+                        client_id=client_id,
+                    )
+
+            self._safe(
+                mirror_to_secondary,
+                "update_human_takeover_by_id",
+                client_id,
+            )
+        return result
+
+    def append_message(
+        self,
+        phone: str,
+        direction: str,
+        message: str,
+        msg_type: str = "text",
+        wa_message_id: str | None = None,
+        *,
+        client_id: int,
+    ) -> bool:
+        if client_id is None:
+            return False
+        result = self._primary.append_message(
+            phone,
+            direction,
+            message,
+            msg_type,
+            wa_message_id,
+            client_id=client_id,
+        )
         self._safe(
-            lambda: self._secondary.append_message(phone, direction, message, msg_type, wa_message_id),
-            "append_message", phone,
+            lambda: self._secondary.append_message(
+                phone,
+                direction,
+                message,
+                msg_type,
+                wa_message_id,
+                client_id=client_id,
+            ),
+            "append_message",
+            client_id,
         )
         return result
 
-    def update_message_status(self, wa_message_id: str, status: str) -> None:
+    def update_message_status(
+        self,
+        wa_message_id: str,
+        status: str,
+        client_id: int,
+    ) -> None:
+        if client_id is None:
+            return
         # Airtable doesn't support message-level statuses right now. We just proxy to Postgres.
         self._safe(
-            lambda: self._secondary.update_message_status(wa_message_id, status),
-            "update_message_status", wa_message_id,
+            lambda: self._secondary.update_message_status(
+                wa_message_id,
+                status,
+                client_id=client_id,
+            ),
+            "update_message_status",
+            client_id,
         )
 
-    def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:
-        self._primary.update_lead_info(phone, name, business_name)
+    def update_lead_info(
+        self,
+        phone: str,
+        name: str | None,
+        business_name: str | None,
+        client_id: int,
+    ) -> None:
+        if client_id is None:
+            return
+        self._primary.update_lead_info(
+            phone,
+            name,
+            business_name,
+            client_id=client_id,
+        )
         self._safe(
-            lambda: self._secondary.update_lead_info(phone, name, business_name),
-            "update_lead_info", phone,
+            lambda: self._secondary.update_lead_info(
+                phone,
+                name,
+                business_name,
+                client_id=client_id,
+            ),
+            "update_lead_info",
+            client_id,
         )
 
-    def update_lead_score(self, phone: str, score: str) -> None:
-        self._primary.update_lead_score(phone, score)
-        self._safe(lambda: self._secondary.update_lead_score(phone, score), "update_lead_score", phone)
+    def update_lead_score(
+        self,
+        phone: str,
+        score: str,
+        client_id: int,
+    ) -> None:
+        if client_id is None:
+            return
+        self._primary.update_lead_score(phone, score, client_id=client_id)
+        self._safe(
+            lambda: self._secondary.update_lead_score(
+                phone,
+                score,
+                client_id=client_id,
+            ),
+            "update_lead_score",
+            client_id,
+        )
 
     # ── helper ────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _safe(fn, op: str, phone: str):
+    def _safe(fn, op: str, client_id: int):
         """Run a Postgres write; log and swallow any error."""
         try:
             fn()
         except Exception as e:  # noqa: BLE001 — intentional: contain migration faults
-            logger.error(f"[DualWrite] Postgres {op} failed for {phone}: {e}")
+            logger.error(
+                "[DualWrite] Postgres shadow write failed",
+                extra={
+                    "event": "dual_write_failed",
+                    "operation": op,
+                    "client_id": client_id,
+                    "error_type": type(e).__name__,
+                },
+            )
 
 
 # ── module-level singleton, chosen at import time from MIGRATION_MODE ──────
 
-_store = None
+_store: LeadStore | None = None
 
 def get_primary_store():
     mode = (MIGRATION_MODE or "airtable").lower()

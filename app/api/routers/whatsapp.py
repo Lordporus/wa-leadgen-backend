@@ -12,9 +12,9 @@ from app.core.config import (
 
 router = APIRouter()
 
-def verify_signature(payload: bytes, signature_header: str) -> bool:
+def verify_signature(payload: bytes, signature_header: str | None) -> bool:
     """Verify Meta's X-Hub-Signature-256 header."""
-    if not signature_header:
+    if not WHATSAPP_APP_SECRET or not signature_header:
         return False
     expected_sig = hmac.new(
         WHATSAPP_APP_SECRET.encode('utf-8'),
@@ -36,11 +36,16 @@ def verify_webhook(request: Request, response: Response):
     challenge = request.query_params.get("hub.challenge")
 
     if mode and token:
-        if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
-            logger.info("Webhook verified successfully.")
-            return int(challenge)
-        else:
+        if mode != "subscribe" or token != WHATSAPP_VERIFY_TOKEN:
             raise HTTPException(status_code=403, detail="Verification token mismatch")
+        if challenge is None:
+            raise HTTPException(status_code=400, detail="Missing webhook challenge")
+        try:
+            parsed_challenge = int(challenge)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid webhook challenge")
+        logger.info("Webhook verified successfully.")
+        return parsed_challenge
 
     raise HTTPException(status_code=400, detail="Bad Request")
 
@@ -53,6 +58,7 @@ def _process_analytics_and_extraction_bg(
     calendly_link: str | None,
     req_won_stages: list,
     req_lost_stages: list,
+    current_client_id: int,
     lord_phone: str | None
 ):
     """
@@ -70,7 +76,11 @@ def _process_analytics_and_extraction_bg(
     # 1. Lead Scoring (Independent Try/Except)
     try:
         score = req_gemini.score_lead(updated_last_message)
-        store.update_lead_score(sender_phone, score)
+        store.update_lead_score(
+            sender_phone,
+            score,
+            client_id=current_client_id,
+        )
     except Exception as e:
         logger.error(f"Lead scoring failed in background: {e}")
 
@@ -82,6 +92,7 @@ def _process_analytics_and_extraction_bg(
                 sender_phone,
                 name=info.get("Name"),
                 business_name=info.get("Business_Name"),
+                client_id=current_client_id,
             )
     except Exception as e:
         logger.error(f"Lead info extraction failed in background: {e}")
@@ -89,12 +100,20 @@ def _process_analytics_and_extraction_bg(
     # 3. Status Updates (Independent Try/Except)
     try:
         if score in req_won_stages:
-            store.update_lead_status(sender_phone, "Qualified")
+            store.update_lead_status(
+                sender_phone,
+                "Qualified",
+                client_id=current_client_id,
+            )
         elif score == "Cold":
             decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
             if any(word in user_text.lower() for word in decline_keywords):
                 lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                store.update_lead_status(sender_phone, lost_stage)
+                store.update_lead_status(
+                    sender_phone,
+                    lost_stage,
+                    client_id=current_client_id,
+                )
                 logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
     except Exception as e:
         logger.error(f"Status update failed in background: {e}")
@@ -104,7 +123,7 @@ def _process_analytics_and_extraction_bg(
         if score in req_won_stages:
             if lord_phone:
                 norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
-                if store.get_lead(norm_lord):
+                if store.get_lead(norm_lord, client_id=current_client_id):
                     logger.error(
                         f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an "
                         f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
@@ -127,7 +146,7 @@ async def receive_message(request: Request, response: Response, background_tasks
     # 1. Verify signature
     signature = request.headers.get("X-Hub-Signature-256")
     body_bytes = await request.body()
-    if WHATSAPP_APP_SECRET and not verify_signature(body_bytes, signature):
+    if not verify_signature(body_bytes, signature):
         logger.warning("Invalid webhook signature rejected.")
         raise HTTPException(status_code=403, detail="Invalid signature")
 
@@ -178,7 +197,11 @@ async def receive_message(request: Request, response: Response, background_tasks
                 if "statuses" in value:
                     for status in value["statuses"]:
                         from app.services.jobs import process_status_update
-                        background_tasks.add_task(process_status_update, status_data=status)
+                        background_tasks.add_task(
+                            process_status_update,
+                            status_data=status,
+                            phone_number_id=phone_number_id,
+                        )
 
         return {"status": "queued"}
     return {"status": "ignored"}

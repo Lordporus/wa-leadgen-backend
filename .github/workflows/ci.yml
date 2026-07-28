@@ -1,0 +1,121 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_ENV: test
+      AIRTABLE_API_KEY: ""
+      AIRTABLE_BASE_ID: ""
+      APIFY_API_TOKEN: ""
+      DATABASE_URL: ""
+      GEMINI_API_KEY: ""
+      NINEROUTER_API_KEY: ""
+      REDIS_URL: ""
+      SENTRY_DSN: ""
+      WHATSAPP_ACCESS_TOKEN: ""
+      WHATSAPP_PHONE_NUMBER_ID: ""
+      WHATSAPP_BUSINESS_ACCOUNT_ID: ""
+      WHATSAPP_APP_SECRET: offline-ci-secret
+      WHATSAPP_VERIFY_TOKEN: offline-ci-token
+      MIGRATION_MODE: airtable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+      - name: Reject local environment files
+        run: |
+          test ! -f .env
+          test ! -f .env.local
+          test ! -f .env.production
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run offline unit tests
+        run: python -m pytest tests/unit -q
+
+  lint-type-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_ENV: ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Import and store-contract checks
+        run: >-
+          python -c
+          "from scripts.ci_static_checks import check_imports_and_store_types;
+          check_imports_and_store_types()"
+      - name: Find changed Python files
+        id: changed-python
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+          else
+            base_sha="$PUSH_BASE_SHA"
+          fi
+
+          if [[ -z "$base_sha" ]]; then
+            echo "::error::Base SHA is missing for ${GITHUB_EVENT_NAME} event." >&2
+            exit 1
+          elif [[ "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git hash-object -t tree /dev/null)"
+          elif ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            echo "::error::Base commit ${base_sha} is unavailable; refusing an unsafe fallback diff." >&2
+            exit 1
+          fi
+
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          git diff --diff-filter=ACMR --name-only -z \
+            "$base_sha" HEAD -- '*.py' \
+            > "$RUNNER_TEMP/changed-python-files"
+
+          if [[ -s "$RUNNER_TEMP/changed-python-files" ]]; then
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            echo "No changed Python files; Ruff and Mypy will be skipped."
+          fi
+      - name: Ruff and Mypy new-diagnostic gate
+        if: steps.changed-python.outputs.has_files == 'true'
+        run: >-
+          python scripts/ci_quality_diff.py
+          --base "${{ steps.changed-python.outputs.base_sha }}"
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+      - name: Scan tracked source without printing values
+        run: python scripts/ci_secret_scan.py

@@ -36,9 +36,14 @@ class AirtableClient:
 
     def _owns_tenant(self, client_id: int | None) -> bool:
         """Return whether this configured Airtable table belongs to client_id."""
-        return client_id is None or int(client_id) == self.client_id
+        if client_id is None:
+            return False
+        try:
+            return int(client_id) == self.client_id
+        except (TypeError, ValueError):
+            return False
 
-    def _search(self, formula: str, client_id=None) -> list:
+    def _search(self, formula: str, client_id: int) -> list:
         """Return matching records only for this configured tenant."""
         if not self.ok or not self._owns_tenant(client_id):
             return []
@@ -89,7 +94,7 @@ class AirtableClient:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def get_lead(self, phone: str, client_id: int | None = None) -> dict | None:
+    def get_lead(self, phone: str, client_id: int) -> dict | None:
         """Return the first record matching this phone, or None."""
         records = self._search(
             f"{{Phone number type}}='{phone}'",
@@ -97,8 +102,17 @@ class AirtableClient:
         )
         return records[0] if records else None
 
-    def add_lead(self, name: str, phone: str, source: str = "Apify - Google Maps") -> dict | None:
+    def add_lead(
+        self,
+        name: str,
+        phone: str,
+        source: str = "Apify - Google Maps",
+        *,
+        client_id: int,
+    ) -> dict | None:
         """Create a new lead record."""
+        if not self._owns_tenant(client_id):
+            return None
         record = self._create({
             "Name":              name,
             "Phone number type": phone,
@@ -110,9 +124,17 @@ class AirtableClient:
             logger.info(f"Added lead: {name} ({phone})")
         return record
 
-    def update_lead_status(self, phone: str, status: str) -> dict | None:
+    def update_lead_status(
+        self,
+        phone: str,
+        status: str,
+        client_id: int,
+    ) -> dict | None:
         """Find lead by phone and update its Status field."""
-        records = self._search(f"{{Phone number type}}='{phone}'")
+        records = self._search(
+            f"{{Phone number type}}='{phone}'",
+            client_id=client_id,
+        )
         if not records:
             logger.warning(f"Lead not found for status update: {phone}")
             return None
@@ -124,19 +146,35 @@ class AirtableClient:
 
     def update_lead_status_by_id(
         self,
-        record_id: str,
+        record_id: str | int,
         status: str,
-        client_id: int | None = None,
+        client_id: int,
     ) -> dict | None:
         """Update a record only when it belongs to this configured tenant."""
-        if not self.get_lead_by_id(record_id, client_id=client_id):
+        normalized_record_id = str(record_id)
+        if not self.get_lead_by_id(normalized_record_id, client_id=client_id):
             return None
-        updated = self._update(record_id, {"Status": status})
+        updated = self._update(normalized_record_id, {"Status": status})
         if updated:
             logger.info(f"Status updated → {status}: record {record_id}")
         return updated
 
-    def get_all_leads(self, client_id=None) -> list:
+    def update_human_takeover_by_id(
+        self,
+        record_id: str | int,
+        enabled: bool,
+        client_id: int,
+    ) -> dict | None:
+        """Update takeover state only for a record owned by this tenant."""
+        normalized_record_id = str(record_id)
+        if not self.get_lead_by_id(normalized_record_id, client_id=client_id):
+            return None
+        return self._update(
+            normalized_record_id,
+            {"is_human_takeover": enabled},
+        )
+
+    def get_all_leads(self, client_id: int) -> list:
         """Return all records from this tenant's configured leads table."""
         return self._search("", client_id=client_id) if self.ok else []
 
@@ -147,13 +185,17 @@ class AirtableClient:
         return self._search("{Status}='Contacted'", client_id=client_id)
 
 
-    def get_lead_by_id(self, record_id: str, client_id: int | None = None) -> dict | None:
+    def get_lead_by_id(
+        self,
+        record_id: str | int,
+        client_id: int,
+    ) -> dict | None:
         """Return a record only for this configured tenant."""
         if not self.ok or not self._owns_tenant(client_id):
             return None
         try:
             resp = requests.get(
-                f"{self.base_url}/{record_id}",
+                f"{self.base_url}/{str(record_id)}",
                 headers=self.headers,
                 timeout=10,
             )
@@ -163,17 +205,33 @@ class AirtableClient:
             logger.error(f"Airtable get_by_id error: {e}")
             return None
 
-    def get_messages_for_lead(self, lead_id: str, client_id: int | None = None) -> list:
+    def get_messages_for_lead(
+        self,
+        lead_id: str | int,
+        client_id: int,
+    ) -> list:
         # Airtable doesn't store separate message rows. Messages are parsed from the Lead's Last_Message field.
         if not self._owns_tenant(client_id):
             return []
         return []
 
-    def append_message(self, phone: str, direction: str, message: str, msg_type: str = "text", wa_message_id: str | None = None) -> bool:
+    def append_message(
+        self,
+        phone: str,
+        direction: str,
+        message: str,
+        msg_type: str = "text",
+        wa_message_id: str | None = None,
+        *,
+        client_id: int,
+    ) -> bool:
         """Append a message to the Last_Message long text field (used as MVP message log)."""
-        records = self._search(f"{{Phone number type}}='{phone}'")
+        records = self._search(
+            f"{{Phone number type}}='{phone}'",
+            client_id=client_id,
+        )
         if not records:
-            return True
+            return False
             
         record = records[0]
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -184,14 +242,30 @@ class AirtableClient:
         self._update(record["id"], {"Last_Message": new_log})
         return True
 
-    def update_message_status(self, wa_message_id: str, status: str) -> None:
+    def update_message_status(
+        self,
+        wa_message_id: str,
+        status: str,
+        client_id: int,
+    ) -> None:
         """No-op for Airtable. Messages are stored as a flat text blob,
         so per-message status isn't tracked here."""
+        if not self._owns_tenant(client_id):
+            return
         logger.debug(f"AirtableClient ignoring status update {status} for {wa_message_id}")
 
-    def update_lead_info(self, phone: str, name: str | None, business_name: str | None) -> None:
+    def update_lead_info(
+        self,
+        phone: str,
+        name: str | None,
+        business_name: str | None,
+        client_id: int,
+    ) -> None:
         """Update Name and/or Business_Name fields if values are provided."""
-        records = self._search(f"{{Phone number type}}='{phone}'")
+        records = self._search(
+            f"{{Phone number type}}='{phone}'",
+            client_id=client_id,
+        )
         if not records:
             return
         fields = {}
@@ -201,9 +275,17 @@ class AirtableClient:
             self._update(records[0]["id"], fields)
             logger.info(f"Lead info updated for {phone}: {fields}")
 
-    def update_lead_score(self, phone: str, score: str) -> None:
+    def update_lead_score(
+        self,
+        phone: str,
+        score: str,
+        client_id: int,
+    ) -> None:
         """Update Lead_Score field."""
-        records = self._search(f"{{Phone number type}}='{phone}'")
+        records = self._search(
+            f"{{Phone number type}}='{phone}'",
+            client_id=client_id,
+        )
         if not records:
             return
         updated = self._update(records[0]["id"], {"Lead_Score": score})

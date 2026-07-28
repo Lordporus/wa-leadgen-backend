@@ -21,7 +21,7 @@ import re
 import logging
 from datetime import datetime
 from apify_client import ApifyClient
-from app.core.config import APIFY_API_TOKEN
+from app.core.config import APIFY_API_TOKEN, CLIENT_ID
 from app.store.store import get_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -64,9 +64,9 @@ def clean_phone(raw: str) -> str | None:
 # ─────────────────────────────────────────────
 # DEDUPLICATION (against the active lead store)
 # ─────────────────────────────────────────────
-def is_duplicate(phone: str, store) -> bool:
+def is_duplicate(phone: str, store, client_id: int = CLIENT_ID) -> bool:
     """Return True if phone already exists in the leads store."""
-    return store.get_lead(phone) is not None
+    return store.get_lead(phone, client_id=client_id) is not None
 
 
 # ─────────────────────────────────────────────
@@ -143,7 +143,11 @@ def clean_leads(raw_leads: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────
 # STORAGE
 # ─────────────────────────────────────────────
-def store_leads(leads: list[dict], store) -> tuple[int, int]:
+def store_leads(
+    leads: list[dict],
+    store,
+    client_id: int = CLIENT_ID,
+) -> tuple[int, int]:
     """
     Push cleaned leads to the active store, skipping duplicates.
     Returns (added, skipped) counts.
@@ -151,7 +155,7 @@ def store_leads(leads: list[dict], store) -> tuple[int, int]:
     added = skipped = 0
     for lead in leads:
         phone = lead["phone"]
-        if is_duplicate(phone, store):
+        if is_duplicate(phone, store, client_id=client_id):
             logger.info(f"Duplicate skipped: {lead['name']} ({phone})")
             skipped += 1
             continue
@@ -160,6 +164,7 @@ def store_leads(leads: list[dict], store) -> tuple[int, int]:
             name=lead["name"],
             phone=phone,
             source=lead["source_label"],
+            client_id=client_id,
         )
         if not record:
             logger.error(f"Failed to store {lead['name']} ({phone})")
@@ -172,7 +177,9 @@ def store_leads(leads: list[dict], store) -> tuple[int, int]:
             if lead.get("address"):   parts.append(f"📍 {lead['address']}")
             if lead.get("rating"):    parts.append(f"⭐ {lead['rating']} ({lead.get('review_count', 0)} reviews)")
             store.append_message(phone, direction="system",
-                                 message="Scraped: " + " | ".join(parts), msg_type="system")
+                                 message="Scraped: " + " | ".join(parts),
+                                 msg_type="system",
+                                 client_id=client_id)
 
         logger.info(f"✅ Added: {lead['name']} ({phone})")
         added += 1
@@ -193,7 +200,12 @@ SOURCE_REGISTRY = {
 # ─────────────────────────────────────────────
 # PUBLIC INTERFACE
 # ─────────────────────────────────────────────
-def get_leads_from_source(source_name: str, query: str = NICHE_QUERY, max_results: int = MAX_RESULTS):
+def get_leads_from_source(
+    source_name: str,
+    query: str = NICHE_QUERY,
+    max_results: int = MAX_RESULTS,
+    client_id: int = CLIENT_ID,
+):
     """
     Main entry point — fetch, clean, dedup, and store leads from a named source.
     Usage:
@@ -212,7 +224,7 @@ def get_leads_from_source(source_name: str, query: str = NICHE_QUERY, max_result
     fetch_fn = SOURCE_REGISTRY[source_name]
     raw_leads = fetch_fn(query, max_results)
     cleaned   = clean_leads(raw_leads)
-    added, skipped = store_leads(cleaned, airtable)
+    added, skipped = store_leads(cleaned, airtable, client_id=client_id)
 
     logger.info(
         f"\n{'='*50}\n"

@@ -71,13 +71,19 @@ def parse_last_message(text: str) -> list[dict]:
     return messages
 
 
-def fetch_all_airtable_leads(airtable: AirtableClient) -> list[dict]:
+def fetch_all_airtable_leads(
+    airtable: AirtableClient,
+    client_id: int,
+) -> list[dict]:
     """Return ALL Airtable records (ignores the formula — pulls everything)."""
-    return airtable._search("")  # empty formula → no filter in Airtable semantics
+    return airtable._search(
+        "",
+        client_id=client_id,
+    )  # empty formula → no filter in Airtable semantics
 
 
 def backfill():
-    from app.core.config import DATABASE_URL
+    from app.core.config import CLIENT_ID, DATABASE_URL
     from app.core.database import init_engine
     init_engine(DATABASE_URL)
     if not database.is_configured():
@@ -89,7 +95,7 @@ def backfill():
         logger.error("Airtable not configured. Aborting backfill.")
         return
 
-    records = fetch_all_airtable_leads(airtable)
+    records = fetch_all_airtable_leads(airtable, client_id=CLIENT_ID)
     logger.info(f"Airtable returned {len(records)} lead(s).")
 
     inserted = 0
@@ -123,7 +129,7 @@ def backfill():
                 status=f.get("Status") or "New Lead",
                 business_name=f.get("Business_Name"),
                 lead_score=f.get("Lead_Score"),
-                client_id=1,  # default tenant
+                client_id=CLIENT_ID,
                 created_at=created_at,
             )
             s.add(lead)

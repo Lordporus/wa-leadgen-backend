@@ -112,17 +112,20 @@ class Client(Base):
 
 class Lead(Base):
     """
-    Single source of truth for a prospect. `phone` is the unique lookup key,
-    stored without `+`/spaces — matching the Airtable convention
+    Single source of truth for a prospect. `phone` is unique within a tenant
+    and stored without `+`/spaces — matching the Airtable convention
     (see docs/schema.md: "Phone number type").
 
     Email (Phase E1): optional secondary contact. Phone remains required.
     Uniqueness is tenant-scoped: one email per client when email is set.
     """
     __tablename__ = "leads"
+    __table_args__ = (
+        UniqueConstraint("client_id", "phone", name="uq_leads_client_phone"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    phone: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    phone: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str] = mapped_column(String(255), default="WhatsApp User")
     source: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="New Lead", index=True)

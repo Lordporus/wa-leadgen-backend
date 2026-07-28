@@ -14,7 +14,7 @@ os.environ['WHATSAPP_SIMULATE_HUMAN_DELAY'] = 'false'
 from app.store.store import get_primary_store, get_secondary_store
 from app.store.webhook_store import WebhookStore
 from app.core.database import init_engine
-from app.core.config import DATABASE_URL
+from app.core.config import CLIENT_ID, DATABASE_URL
 from app.clients.whatsapp_client import WhatsAppClient
 from app.clients.gemini_client import GeminiClient
 from app.services import tenant
@@ -39,26 +39,38 @@ print(f"Store configured as: {type(store).__name__}")
 
 async def main():
     print("Warming up database connection pool...")
-    store.get_lead("000")  # Dummy query to establish TLS handshake
+    store.get_lead("000", client_id=CLIENT_ID)  # Dummy query to establish TLS handshake
     
     t_start = time.time()
     
     # 1. Lead lookup
     t0 = time.time()
-    lead = store.get_lead(phone)
+    lead = store.get_lead(phone, client_id=CLIENT_ID)
     t1 = time.time()
     print(f"Lead lookup took: {t1-t0:.2f}s (Lead found: {bool(lead)})")
     
     # 2. Add lead
     if not lead:
         t0 = time.time()
-        lead = store.add_lead(name, phone, "WhatsApp Inbound")
+        lead = store.add_lead(
+            name,
+            phone,
+            "WhatsApp Inbound",
+            client_id=CLIENT_ID,
+        )
         t1 = time.time()
         print(f"Add lead took: {t1-t0:.2f}s")
     
     # 3. Append message (Inbound)
     t0 = time.time()
-    store.append_message(phone, "INBOUND", "Test message", "text", "wamid.test_123")
+    store.append_message(
+        phone,
+        "INBOUND",
+        "Test message",
+        "text",
+        "wamid.test_123",
+        client_id=CLIENT_ID,
+    )
     t1 = time.time()
     print(f"Append inbound message took: {t1-t0:.2f}s")
     
@@ -78,9 +90,16 @@ async def main():
     
     # 6. Append message (Outbound)
     t0 = time.time()
-    store.append_message(phone, "OUTBOUND", reply, "text", res if res else "failed")
+    store.append_message(
+        phone,
+        "OUTBOUND",
+        reply,
+        "text",
+        res if res else "failed",
+        client_id=CLIENT_ID,
+    )
     if not res:
-        store.update_message_status("failed", "failed")
+        store.update_message_status("failed", "failed", client_id=CLIENT_ID)
     t1 = time.time()
     print(f"Append outbound message took: {t1-t0:.2f}s")
     

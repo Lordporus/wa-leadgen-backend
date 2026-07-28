@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app.api.dependencies import get_client_key, limiter, require_api_key
 from app.api.runtime import logger, store, whatsapp
+from app.core.config import LEGACY_LEAD_ID_COMPAT_ENABLED
 from app.core.database import SessionLocal
 from app.core.models import Client, EmailSuppression, Lead, Message
 from app.email.email_validation import validate_lead_email
@@ -55,10 +56,23 @@ def _store_record_for_lead_id(lead_id: str, client_id: int) -> dict | None:
     if not normalized.isdigit():
         return store.get_lead_by_id(normalized, client_id=client_id)
 
+    if not LEGACY_LEAD_ID_COMPAT_ENABLED:
+        return None
+
     pg_lead = _load_postgres_lead(lead_id=int(normalized), client_id=client_id)
     if not pg_lead:
         return None
-    return store.get_lead(pg_lead.phone, client_id=client_id)
+    record = store.get_lead(pg_lead.phone, client_id=client_id)
+    if record:
+        logger.warning(
+            "Legacy numeric lead ID resolved in Airtable-backed mode",
+            extra={
+                "event": "legacy_lead_id_resolved",
+                "client_id": client_id,
+                "legacy_id_kind": "postgres_numeric",
+            },
+        )
+    return record
 
 
 def _postgres_lead_id_for_record(
@@ -81,10 +95,8 @@ def _postgres_lead_id_for_record(
 
 
 def _append_store_message(*, phone: str, client_id: int, **kwargs) -> bool:
-    """Pass tenant context to Postgres without changing Airtable signatures."""
-    if _is_postgres_store():
-        return store.append_message(phone=phone, client_id=client_id, **kwargs)
-    return store.append_message(phone=phone, **kwargs)
+    """Append through the common tenant-scoped store contract."""
+    return store.append_message(phone=phone, client_id=client_id, **kwargs)
 
 
 def _parse_created_at(raw: str) -> datetime | None:
@@ -325,27 +337,23 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
 @router.get("/api/leads/{lead_id}/messages")
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_lead_messages(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
-    """Return all messages for a lead from Postgres.
+    """Return normalized Postgres messages with an Airtable-history fallback.
 
-    NOTE: This endpoint intentionally bypasses the `store` abstraction and
-    queries Postgres directly. Reason: messages are *only* written to Postgres
-    (via db_client.append_message), regardless of MIGRATION_MODE. When
-    MIGRATION_MODE=dual, `store` routes reads to Airtable (the primary), which
-    has no per-message rows — routing through store.get_messages_for_lead()
-    would silently return [] and be a functional regression. Direct Postgres
-    query is the correct and intentional path here.
+    Dual/Postgres mode prefers normalized message rows. Airtable-only mode, or
+    a dual-mode lead that has not yet been mirrored, falls back to the scoped
+    record's Last_Message history.
     """
     try:
         record = _store_record_for_lead_id(lead_id, client.id)
         if not record:
             return []
+        fallback = _parse_messages(record.get("fields", {}).get("Last_Message", ""))
         parsed_id = _postgres_lead_id_for_record(lead_id, record, client.id)
         if parsed_id is None:
-            return []
+            return fallback
 
         if not SessionLocal:
-            # Postgres not configured; no messages can exist.
-            return []
+            return fallback
 
         from app.core.models import Lead, Message
         with SessionLocal() as s:
@@ -357,9 +365,7 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
             ).first()
 
             if not lead:
-                # Return [] rather than 404 — the frontend silently ignores an
-                # absent messages list, and SWR would log console errors on 404.
-                return []
+                return fallback
 
             msgs = (
                 s.query(Message)
@@ -392,7 +398,7 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
                         "msg_type": m.msg_type,
                     }
                 )
-            return result
+            return result or fallback
     except HTTPException:
         raise
     except Exception as e:
@@ -447,16 +453,13 @@ def takeover_lead(request: Request, response: Response, lead_id: str, client: Cl
     record = _store_record_for_lead_id(lead_id, client.id)
     if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
-    if pg_lead_id is None:
+    updated = store.update_human_takeover_by_id(
+        record["id"],
+        True,
+        client_id=client.id,
+    )
+    if not updated:
         raise HTTPException(status_code=404, detail="Lead not found")
-    from app.core.models import Lead
-    with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
-        if not lead:
-            raise HTTPException(status_code=404, detail="Lead not found")
-        lead.is_human_takeover = True
-        s.commit()
     return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": True}
 
 @router.post("/api/leads/{lead_id}/release", dependencies=[Depends(require_api_key)])
@@ -466,16 +469,13 @@ def release_lead(request: Request, response: Response, lead_id: str, client: Cli
     record = _store_record_for_lead_id(lead_id, client.id)
     if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
-    if pg_lead_id is None:
+    updated = store.update_human_takeover_by_id(
+        record["id"],
+        False,
+        client_id=client.id,
+    )
+    if not updated:
         raise HTTPException(status_code=404, detail="Lead not found")
-    from app.core.models import Lead
-    with SessionLocal() as s:
-        lead = s.query(Lead).filter(Lead.id == pg_lead_id, Lead.client_id == client.id).first()
-        if not lead:
-            raise HTTPException(status_code=404, detail="Lead not found")
-        lead.is_human_takeover = False
-        s.commit()
     return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": False}
 
 
