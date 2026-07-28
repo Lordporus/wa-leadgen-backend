@@ -65,6 +65,11 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Import and store-contract checks
+        run: >-
+          python -c
+          "from scripts.ci_static_checks import check_imports_and_store_types;
+          check_imports_and_store_types()"
       - name: Find changed Python files
         id: changed-python
         shell: bash
@@ -78,12 +83,14 @@ jobs:
             base_sha="$PUSH_BASE_SHA"
           fi
 
-          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
-            base_sha="$(git rev-list --max-parents=0 HEAD)"
-          fi
-
-          if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
-            base_sha="$(git rev-list --max-parents=0 HEAD)"
+          if [[ -z "$base_sha" ]]; then
+            echo "::error::Base SHA is missing for ${GITHUB_EVENT_NAME} event." >&2
+            exit 1
+          elif [[ "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git hash-object -t tree /dev/null)"
+          elif ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            echo "::error::Base commit ${base_sha} is unavailable; refusing an unsafe fallback diff." >&2
+            exit 1
           fi
 
           git diff --diff-filter=ACMR --name-only -z \
@@ -103,7 +110,7 @@ jobs:
           mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
           python -m ruff check "${files[@]}"
       - name: Mypy check changed Python files
-        if: steps.changed-python.outputs.has_files == 'true'
+        if: ${{ always() && steps.changed-python.outputs.has_files == 'true' }}
         shell: bash
         run: |
           mapfile -d '' files < "$RUNNER_TEMP/changed-python-files"
@@ -112,12 +119,6 @@ jobs:
             --check-untyped-defs \
             --show-error-codes \
             "${files[@]}"
-      - name: Import and store-contract checks
-        run: >-
-          python -c
-          "from scripts.ci_static_checks import check_imports_and_store_types;
-          check_imports_and_store_types()"
-
   secret-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
