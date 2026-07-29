@@ -14,9 +14,9 @@ from app.services import jobs
 
 
 def _app_secret() -> str:
-    secret = whatsapp_router.WHATSAPP_APP_SECRET
-    assert isinstance(secret, str)
-    return secret
+    app_secret = whatsapp_router.WHATSAPP_APP_SECRET
+    assert isinstance(app_secret, str)
+    return app_secret
 
 
 def _signed_request(payload: dict) -> Request:
