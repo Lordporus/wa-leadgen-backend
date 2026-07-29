@@ -79,6 +79,19 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 # ── Redis Queue ──────────────────────────────────────────────────────
 # Used by RQ workers to process webhook jobs off the HTTP hot path.
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+WHATSAPP_RQ_QUEUE = os.getenv("WHATSAPP_RQ_QUEUE", "whatsapp-webhooks")
+WHATSAPP_RQ_JOB_TIMEOUT = int(os.getenv("WHATSAPP_RQ_JOB_TIMEOUT", "300"))
+WHATSAPP_RQ_MAX_RETRIES = int(os.getenv("WHATSAPP_RQ_MAX_RETRIES", "3"))
+WHATSAPP_RQ_WORKER_CONCURRENCY = int(os.getenv("WHATSAPP_RQ_WORKER_CONCURRENCY", "1"))
+WHATSAPP_RQ_CONSUMER_ENABLED = (
+    os.getenv("WHATSAPP_RQ_CONSUMER_ENABLED", "true").strip().lower() == "true"
+)
+# Delays are intentionally finite: 10s, 30s, then 90s by default.
+WHATSAPP_RQ_RETRY_INTERVALS = tuple(
+    int(value.strip())
+    for value in os.getenv("WHATSAPP_RQ_RETRY_INTERVALS", "10,30,90").split(",")
+    if value.strip()
+)
 
 # ── Inbound lead creation guard ───────────────────────────────────────────
 # Numbers in this list will be silently dropped and never auto-created as

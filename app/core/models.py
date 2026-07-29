@@ -283,6 +283,35 @@ class DualWriteFailure(Base):
     client: Mapped["Client"] = relationship()
 
 
+class WhatsAppWebhookEvent(Base):
+    """Durable WhatsApp ingress receipt and dead-letter/replay record."""
+
+    __tablename__ = "whatsapp_webhook_events"
+    __table_args__ = (
+        UniqueConstraint("client_id", "event_kind", "event_id", name="uq_whatsapp_webhook_event"),
+        Index("idx_whatsapp_webhook_events_state", "state", "received_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    event_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    phone_number_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(String(30), nullable=False, default="received")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rq_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    client: Mapped["Client"] = relationship()
+
+
 class PipelineStage(Base):
     """
     Phase 8 — per-client ordered pipeline stage.

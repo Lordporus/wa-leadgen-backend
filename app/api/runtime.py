@@ -7,6 +7,7 @@ from app.clients.calendly_client import CalendlyClient
 from app.clients.whatsapp_client import WhatsAppClient
 from app.core.config import (
     REDIS_URL,
+    WHATSAPP_RQ_QUEUE,
     SENTRY_DSN,
     SENTRY_ENVIRONMENT,
     SENTRY_TRACES_SAMPLE_RATE,
@@ -46,4 +47,4 @@ redis_conn = (
     if REDIS_URL
     else None
 )
-webhook_queue = RQQueue("webhooks", connection=redis_conn) if redis_conn else None
+webhook_queue = RQQueue(WHATSAPP_RQ_QUEUE, connection=redis_conn) if redis_conn else None

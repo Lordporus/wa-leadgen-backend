@@ -167,6 +167,8 @@ def process_webhook_message(
             return
         logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
         wamid = whatsapp.send_message(sender_phone, refusal)
+        if not wamid:
+            raise ValueError("WhatsApp provider did not accept the safe refusal")
         store.append_message(
             sender_phone, direction="outbound", message=refusal,
             msg_type="text", wa_message_id=wamid, client_id=current_client_id,
@@ -223,6 +225,11 @@ def process_webhook_message(
 
     # ── 6. Send WhatsApp reply ───────────────────────────────────────────
     wamid = whatsapp.send_message(sender_phone, ai_reply)
+    if not wamid:
+        # A rate/policy rejection is not a sent message. Raising makes the
+        # RQ wrapper dead-letter the permanent failure instead of recording a
+        # false outbound delivery.
+        raise ValueError("WhatsApp provider did not accept the outbound message")
     store.append_message(
         sender_phone, direction="outbound", message=ai_reply,
         msg_type="text", wa_message_id=wamid, client_id=current_client_id,
