@@ -4,11 +4,13 @@ import hmac
 import inspect
 import json
 from urllib.parse import urlencode
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request, Response
 
 from app.api.routers import whatsapp as whatsapp_router
+from app.services import jobs
 
 
 def _app_secret() -> str:
@@ -123,6 +125,11 @@ def test_duplicate_message_is_not_enqueued(monkeypatch):
             raise AssertionError("Duplicate keys must not be refreshed")
 
     monkeypatch.setattr(whatsapp_router, "redis_conn", DuplicateRedis())
+    monkeypatch.setattr(
+        whatsapp_router.tenant,
+        "resolve_context_by_phone_id",
+        lambda _phone_id: type("Context", (), {"client": type("Client", (), {"id": 7})()})(),
+    )
     payload = {
         "object": "whatsapp_business_account",
         "entry": [{
@@ -143,6 +150,11 @@ def test_duplicate_message_is_not_enqueued(monkeypatch):
 
 def test_fresh_message_and_status_are_queued_without_running_providers(monkeypatch):
     monkeypatch.setattr(whatsapp_router, "redis_conn", None)
+    monkeypatch.setattr(
+        whatsapp_router.tenant,
+        "resolve_context_by_phone_id",
+        lambda _phone_id: type("Context", (), {"client": type("Client", (), {"id": 7})()})(),
+    )
     payload = {
         "object": "whatsapp_business_account",
         "entry": [{
@@ -160,3 +172,85 @@ def test_fresh_message_and_status_are_queued_without_running_providers(monkeypat
 
     assert result == {"status": "queued"}
     assert len(tasks.tasks) == 2
+    assert tasks.tasks[0].kwargs == {
+        "phone_number_id": "test-number",
+        "message_data": {"id": "", "from": "15550000000", "type": "text"},
+        "current_client_id": 7,
+    }
+    assert tasks.tasks[1].kwargs == {
+        "status_data": {"id": "wamid.status", "status": "delivered"},
+        "phone_number_id": "test-number",
+        "current_client_id": 7,
+    }
+
+
+@pytest.mark.parametrize("phone_number_id", ["unknown-number", "inactive-number"])
+def test_unknown_or_inactive_phone_number_has_no_side_effect(monkeypatch, phone_number_id):
+    class UnexpectedRedis:
+        def ping(self):
+            raise AssertionError("unverified phone must not reach Redis")
+
+    database_session = MagicMock(side_effect=AssertionError("unverified phone must not reach DB"))
+
+    monkeypatch.setattr(whatsapp_router, "redis_conn", UnexpectedRedis())
+    monkeypatch.setattr("app.core.database.SessionLocal", database_session)
+    monkeypatch.setattr(
+        whatsapp_router.tenant,
+        "resolve_context_by_phone_id",
+        lambda _phone_id: None,
+    )
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "metadata": {"phone_number_id": phone_number_id},
+                    "messages": [{"id": "wamid.unknown", "from": "15550000000"}],
+                    "statuses": [{"id": "wamid.unknown", "status": "delivered"}],
+                }
+            }]
+        }],
+    }
+
+    result, tasks = _call_webhook(payload)
+
+    assert result == {"status": "queued"}
+    assert tasks.tasks == []
+    database_session.assert_not_called()
+
+
+@pytest.mark.parametrize("processor, payload", [
+    (
+        jobs.process_webhook_message,
+        ("verified-phone", {"id": "wamid.stale", "from": "15550000000", "type": "text", "text": {"body": "hello"}}),
+    ),
+    (
+        jobs.process_status_update,
+        ({"id": "wamid.stale", "status": "delivered"}, 8, "verified-phone"),
+    ),
+])
+def test_forged_or_stale_job_tenant_is_rejected_before_store_access(monkeypatch, processor, payload):
+    context = type("Context", (), {"client": type("Client", (), {"id": 7})()})()
+    monkeypatch.setattr(jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: context)
+    monkeypatch.setattr(jobs, "get_store", lambda: (_ for _ in ()).throw(AssertionError("mismatch must not reach store")))
+
+    if processor is jobs.process_webhook_message:
+        processor(*payload, current_client_id=8)
+    else:
+        status_data, current_client_id, phone_number_id = payload
+        processor(status_data, current_client_id=current_client_id, phone_number_id=phone_number_id)
+
+
+def test_jobs_do_not_fallback_to_client_id_outside_explicit_local_test_mode(monkeypatch):
+    monkeypatch.setattr(jobs, "WHATSAPP_LOCAL_TEST_TENANT_FALLBACK", False)
+    monkeypatch.setattr(jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: None)
+    monkeypatch.setattr(jobs, "get_store", lambda: (_ for _ in ()).throw(AssertionError("unverified tenant must not reach store")))
+
+    jobs.process_webhook_message(
+        "unknown-phone",
+        {"id": "wamid.no-fallback", "from": "15550000000", "type": "text", "text": {"body": "hello"}},
+    )
+    jobs.process_status_update(
+        {"id": "wamid.no-fallback", "status": "delivered"},
+        phone_number_id="unknown-phone",
+    )
