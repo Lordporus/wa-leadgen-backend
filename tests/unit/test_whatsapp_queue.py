@@ -204,8 +204,13 @@ def test_replay_only_requeues_a_dead_letter_receipt(monkeypatch):
             return receipt
 
     replayed = []
+
+    def fake_enqueue(**kwargs):
+        replayed.append(kwargs)
+        return "cid-replayed"
+
     monkeypatch.setattr(whatsapp_queue.database, "SessionLocal", Session)
-    monkeypatch.setattr(whatsapp_queue, "enqueue_event", lambda **kwargs: replayed.append(kwargs) or "cid-replayed")
+    monkeypatch.setattr(whatsapp_queue, "enqueue_event", fake_enqueue)
 
     assert whatsapp_queue.replay_dead_letter(receipt_id=10) == "cid-replayed"
     assert replayed == [{"kind": "message", "payload": _envelope()["payload"], "phone_number_id": "phone-id", "client_id": 7}]

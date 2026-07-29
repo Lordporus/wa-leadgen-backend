@@ -13,9 +13,15 @@ from app.api.routers import whatsapp as whatsapp_router
 from app.services import jobs
 
 
+def _app_secret() -> str:
+    secret = whatsapp_router.WHATSAPP_APP_SECRET
+    assert isinstance(secret, str)
+    return secret
+
+
 def _signed_request(payload: dict) -> Request:
     body = json.dumps(payload, separators=(",", ":")).encode()
-    signature = hmac.new(whatsapp_router.WHATSAPP_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    signature = hmac.new(_app_secret().encode(), body, hashlib.sha256).hexdigest()
     sent = False
 
     async def receive():
@@ -42,7 +48,7 @@ def _context(client_id=7):
 
 def test_signature_verification_accepts_valid_and_rejects_invalid():
     body = b'{"object":"whatsapp_business_account"}'
-    digest = hmac.new(whatsapp_router.WHATSAPP_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    digest = hmac.new(_app_secret().encode(), body, hashlib.sha256).hexdigest()
     assert whatsapp_router.verify_signature(body, f"sha256={digest}") is True
     assert whatsapp_router.verify_signature(body, "sha256=invalid") is False
 
