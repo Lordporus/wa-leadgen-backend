@@ -187,6 +187,7 @@ def process_webhook_message(
             return
 
     if not is_safe:
+        assert refusal is not None
         logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
         if intent_id is None:
             wamid = whatsapp.send_message(sender_phone, refusal)
