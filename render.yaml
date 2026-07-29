@@ -36,6 +36,21 @@ services:
         sync: false
       - key: MIGRATION_MODE
         value: dual       # airtable | dual | postgres
+      # ── Phase 5: durable WhatsApp webhook queue ──
+      - key: REDIS_URL
+        sync: false
+      - key: WHATSAPP_RQ_QUEUE
+        value: whatsapp-webhooks
+      - key: WHATSAPP_RQ_JOB_TIMEOUT
+        value: "300"
+      - key: WHATSAPP_RQ_MAX_RETRIES
+        value: "3"
+      - key: WHATSAPP_RQ_WORKER_CONCURRENCY
+        value: "1"
+      - key: WHATSAPP_RQ_CONSUMER_ENABLED
+        value: "true"
+      - key: WHATSAPP_RQ_RETRY_INTERVALS
+        value: "10,30,90"
       # ── Phase 8: Multi-tenant ──
       - key: CLIENT_ID
         value: 1          # override per Render service for each new client
@@ -86,3 +101,47 @@ services:
         value: "false"    # E5: keep AI email drafts human-reviewed unless flipped
       - key: EMAIL_AI_AUTO_REPLY
         value: "true"     # E6: auto-reply to inbound email after confidence gate
+  - type: worker
+    name: whatsapp-acquisition-worker
+    env: python
+    plan: free
+    numInstances: 1
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python worker.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: MIGRATION_MODE
+        value: dual
+      - key: WHATSAPP_RQ_QUEUE
+        value: whatsapp-webhooks
+      - key: WHATSAPP_RQ_JOB_TIMEOUT
+        value: "300"
+      - key: WHATSAPP_RQ_MAX_RETRIES
+        value: "3"
+      - key: WHATSAPP_RQ_WORKER_CONCURRENCY
+        value: "1"
+      - key: WHATSAPP_RQ_CONSUMER_ENABLED
+        value: "true"
+      - key: WHATSAPP_RQ_RETRY_INTERVALS
+        value: "10,30,90"
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_NAME
+        sync: false
+      - key: CLIENT_ID
+        value: 1

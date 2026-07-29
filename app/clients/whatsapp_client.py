@@ -63,17 +63,13 @@ class WhatsAppClient:
             }
         }
         
-        try:
-            response = requests.post(self.base_url, headers=headers, json=payload)
-            response.raise_for_status()
-            logger.info(f"Text message sent to {to_phone}.")
-            data = response.json()
-            return data.get("messages", [{}])[0].get("id")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to send message to {to_phone}: {e}")
-            if e.response is not None:
-                logger.error(f"Error details: {e.response.text}")
-            return None
+        # Deliberately let RequestException propagate. The durable RQ worker
+        # classifies provider/network failures and schedules bounded retries.
+        response = requests.post(self.base_url, headers=headers, json=payload)
+        response.raise_for_status()
+        logger.info(f"Text message sent to {to_phone}.")
+        data = response.json()
+        return data.get("messages", [{}])[0].get("id")
 
     def send_template(self, to_phone: str, template_name: str, language_code: str = "en") -> str | None:
         """Send a pre-approved template message (required for initial outbound outreach)."""

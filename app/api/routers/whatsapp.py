@@ -1,10 +1,10 @@
 import hashlib
 import hmac
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.api.dependencies import limiter
-from app.api.runtime import logger, redis_conn, whatsapp
+from app.api.runtime import logger, whatsapp
 from app.core.config import (
     WHATSAPP_APP_SECRET,
     WHATSAPP_VERIFY_TOKEN,
@@ -138,7 +138,7 @@ def _process_analytics_and_extraction_bg(
 
 @router.post("/webhook")
 @limiter.limit("1000/minute")
-async def receive_message(request: Request, response: Response, background_tasks: BackgroundTasks):
+async def receive_message(request: Request, response: Response):
     """
     Receive incoming messages from WhatsApp users.
     Fast-ACK: HMAC verify → dedup → enqueue RQ job → return 200.
@@ -151,12 +151,26 @@ async def receive_message(request: Request, response: Response, background_tasks
         logger.warning("Invalid webhook signature rejected.")
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
 
     if body.get("object") == "whatsapp_business_account":
+        if not isinstance(body.get("entry", []), list):
+            raise HTTPException(status_code=400, detail="Invalid webhook entries")
         for entry in body.get("entry", []):
+            if not isinstance(entry, dict):
+                raise HTTPException(status_code=400, detail="Invalid webhook entry")
             for change in entry.get("changes", []):
+                if not isinstance(change, dict):
+                    raise HTTPException(status_code=400, detail="Invalid webhook change")
                 value = change.get("value", {})
+                if not isinstance(value, dict):
+                    raise HTTPException(status_code=400, detail="Invalid webhook value")
                 phone_number_id = value.get("metadata", {}).get("phone_number_id")
 
                 # Tenant routing is an ingress invariant: never let an
@@ -170,67 +184,65 @@ async def receive_message(request: Request, response: Response, background_tasks
                         "WhatsApp webhook skipped for unknown or inactive phone_number_id",
                         extra={"event": "unknown_tenant_phone_number"},
                     )
-                    continue
+                    # Do not ACK as queued: this event has neither a durable
+                    # receipt nor a queue job. Meta can surface/retry the
+                    # configuration error instead of the event being lost.
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Unknown or inactive WhatsApp phone number",
+                    )
 
                 current_client_id = tenant_context.client.id
 
                 if "messages" in value:
                     for message in value["messages"]:
-                        msg_id = message.get("id", "")
-
-                        # Redis dedup: SETNX returns False if key already exists
-                        if msg_id and redis_conn:
-                            try:
-                                redis_conn.ping()  # verify connection is alive
-                                dedup_key = f"wamid:{msg_id}"
-                                if not redis_conn.setnx(dedup_key, 1):
-                                    logger.info(f"Duplicate webhook deduped at Redis | wamid: {msg_id}")
-                                    continue
-                                redis_conn.expire(dedup_key, 86400)
-                            except Exception as e:
-                                logger.warning(f"Redis unavailable, skipping dedup check: {e}")
-
-                        # DB-level dedup fallback when Redis unavailable.
-                        # The lookup is tenant-scoped so one tenant cannot
-                        # suppress another tenant's inbound provider event.
-                        if msg_id:
-                            try:
-                                from app.core.database import SessionLocal
-                                from app.core.models import Message
-                                from sqlalchemy import select
-                                with SessionLocal() as session:
-                                    existing = session.execute(
-                                        select(Message)
-                                        .join(Message.lead)
-                                        .where(
-                                            Message.wa_message_id == msg_id,
-                                            Message.lead.has(client_id=current_client_id),
-                                        )
-                                    ).scalar_one_or_none()
-                                    if existing:
-                                        logger.info(f"Duplicate webhook deduped at DB | wamid: {msg_id}")
-                                        continue
-                            except Exception as db_err:
-                                logger.warning(f"DB dedup check failed: {db_err}")
-
-                        # Use BackgroundTasks directly instead of RQ (since no worker is deployed yet)
-                        from app.services.jobs import process_webhook_message
-                        background_tasks.add_task(
-                            process_webhook_message,
+                        if not isinstance(message, dict):
+                            raise HTTPException(status_code=400, detail="Invalid WhatsApp message")
+                        # The envelope contains only the provider event needed by
+                        # the worker; contacts are reduced to the profile name.
+                        job_payload = dict(message)
+                        contacts = value.get("contacts")
+                        if isinstance(contacts, list) and contacts:
+                            profile = contacts[0].get("profile", {}) if isinstance(contacts[0], dict) else {}
+                            if isinstance(profile, dict) and profile.get("name"):
+                                job_payload["profile_name"] = profile["name"]
+                        _enqueue_or_retry(
+                            kind="message",
+                            payload=job_payload,
                             phone_number_id=phone_number_id,
-                            message_data=message,
-                            current_client_id=current_client_id,
+                            client_id=current_client_id,
                         )
 
                 if "statuses" in value:
                     for status in value["statuses"]:
-                        from app.services.jobs import process_status_update
-                        background_tasks.add_task(
-                            process_status_update,
-                            status_data=status,
+                        if not isinstance(status, dict):
+                            raise HTTPException(status_code=400, detail="Invalid WhatsApp status")
+                        _enqueue_or_retry(
+                            kind="status",
+                            payload=dict(status),
                             phone_number_id=phone_number_id,
-                            current_client_id=current_client_id,
+                            client_id=current_client_id,
                         )
 
         return {"status": "queued"}
     return {"status": "ignored"}
+
+
+def _enqueue_or_retry(*, kind: str, payload: dict, phone_number_id: str, client_id: int) -> None:
+    """Never substitute in-process work when the durable queue is unavailable."""
+    from app.services.whatsapp_queue import PermanentWebhookError, enqueue_event
+
+    try:
+        enqueue_event(
+            kind=kind,
+            payload=payload,
+            phone_number_id=phone_number_id,
+            client_id=client_id,
+        )
+    except PermanentWebhookError as exc:
+        raise HTTPException(status_code=400, detail="Invalid WhatsApp event") from exc
+    except Exception as exc:
+        logger.error("WhatsApp durable enqueue failed: %s", type(exc).__name__)
+        # Meta retries non-2xx delivery. A 503 is safer than acknowledging an
+        # event that is not durable in Redis/RQ.
+        raise HTTPException(status_code=503, detail="Webhook queue unavailable") from exc
