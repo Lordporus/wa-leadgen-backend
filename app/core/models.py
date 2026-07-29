@@ -147,6 +147,7 @@ class Lead(Base):
     lead_score_numeric: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notified_hot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_human_takeover: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    whatsapp_opted_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ── Email contact (Phase E1) ──────────────────────────────────────────
     # email_status: unknown | valid | bounced | complained | unsubscribed
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
@@ -214,6 +215,7 @@ class Message(Base):
     is the generic id for email / future channels).
     """
     __tablename__ = "messages"
+    __table_args__ = (UniqueConstraint("outbound_intent_id", name="uq_messages_outbound_intent"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(
@@ -235,6 +237,9 @@ class Message(Base):
     email_headers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Not named "metadata" — reserved on SQLAlchemy Declarative API.
     provider_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outbound_intent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("whatsapp_outbound_intents.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
@@ -308,6 +313,45 @@ class WhatsAppWebhookEvent(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    client: Mapped["Client"] = relationship()
+
+
+class WhatsAppOutboundIntent(Base):
+    """One durable, tenant-scoped WhatsApp reply intent per inbound event/version."""
+
+    __tablename__ = "whatsapp_outbound_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_id", "inbound_event_id", "reply_version",
+            name="uq_whatsapp_outbound_intent_reply",
+        ),
+        UniqueConstraint(
+            "client_id", "provider_message_id",
+            name="uq_whatsapp_outbound_intent_provider_message",
+        ),
+        Index("idx_whatsapp_outbound_intents_state", "state", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    inbound_event_id: Mapped[int] = mapped_column(
+        ForeignKey("whatsapp_webhook_events.id", ondelete="CASCADE"), nullable=False
+    )
+    reply_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    recipient_phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped["Client"] = relationship()
 

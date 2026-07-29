@@ -29,7 +29,10 @@ def test_worker_executes_message_only_in_worker(monkeypatch):
 
     whatsapp_queue.process_webhook_event(_envelope())
 
-    assert calls == [(("phone-id", _envelope()["payload"]), {"current_client_id": 7})]
+    assert calls == [(
+        ("phone-id", _envelope()["payload"]),
+        {"current_client_id": 7, "inbound_event_id": "wamid.phase5", "correlation_id": "cid-1"},
+    )]
     assert [state[0][3] for state in states] == ["processing", "processed"]
 
 
@@ -84,6 +87,33 @@ def test_enqueue_creates_a_durable_receipt_and_bounded_rq_job(monkeypatch):
     assert kwargs["meta"] == {"whatsapp_initial_retries": whatsapp_queue.WHATSAPP_RQ_MAX_RETRIES}
 
 
+def test_concurrent_receipt_conflict_reconciles_existing_event(monkeypatch):
+    existing = SimpleNamespace(correlation_id="existing-correlation")
+    class Query:
+        def __init__(self): self.calls = 0
+        def filter_by(self, **_): return self
+        def one_or_none(self):
+            self.calls += 1
+            return None if self.calls == 1 else existing
+        def one(self): return existing
+    query = Query()
+    class Session:
+        commits = 0
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def query(self, _): return query
+        def add(self, _): pass
+        def flush(self): pass
+        def commit(self):
+            self.commits += 1
+            if self.commits == 1:
+                raise whatsapp_queue.IntegrityError("insert", {}, Exception())
+        def rollback(self): pass
+    monkeypatch.setattr(whatsapp_queue.database, "SessionLocal", Session)
+    monkeypatch.setattr(whatsapp_queue, "webhook_queue", object())
+    assert whatsapp_queue.enqueue_event(kind="message", payload=_envelope()["payload"], phone_number_id="phone-id", client_id=7) == "existing-correlation"
+
+
 def test_queued_envelope_can_execute_after_worker_restart(monkeypatch):
     """A serialized RQ payload has no web-process state and can be resumed."""
     calls = []
@@ -104,7 +134,10 @@ def test_worker_routes_status_events_through_same_durable_worker(monkeypatch):
 
     whatsapp_queue.process_webhook_event(_envelope("status"))
 
-    assert calls == [(({"id": "wamid.phase5", "status": "read"},), {"current_client_id": 7, "phone_number_id": "phone-id"})]
+    assert calls == [(
+        ({"id": "wamid.phase5", "status": "read"},),
+        {"current_client_id": 7, "phone_number_id": "phone-id", "require_known_intent": True},
+    )]
 
 
 def test_retryable_failure_is_re_raised_for_bounded_rq_retry(monkeypatch):

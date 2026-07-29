@@ -49,6 +49,8 @@ services:
         value: "1"
       - key: WHATSAPP_RQ_CONSUMER_ENABLED
         value: "true"
+      - key: WHATSAPP_OUTBOUND_ENABLED
+        value: "true"
       - key: WHATSAPP_RQ_RETRY_INTERVALS
         value: "10,30,90"
       # ── Phase 8: Multi-tenant ──
@@ -126,6 +128,8 @@ services:
       - key: WHATSAPP_RQ_WORKER_CONCURRENCY
         value: "1"
       - key: WHATSAPP_RQ_CONSUMER_ENABLED
+        value: "true"
+      - key: WHATSAPP_OUTBOUND_ENABLED
         value: "true"
       - key: WHATSAPP_RQ_RETRY_INTERVALS
         value: "10,30,90"
