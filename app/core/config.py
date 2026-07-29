@@ -86,6 +86,8 @@ WHATSAPP_RQ_WORKER_CONCURRENCY = int(os.getenv("WHATSAPP_RQ_WORKER_CONCURRENCY",
 WHATSAPP_RQ_CONSUMER_ENABLED = (
     os.getenv("WHATSAPP_RQ_CONSUMER_ENABLED", "true").strip().lower() == "true"
 )
+WHATSAPP_OUTBOUND_ENABLED = os.getenv("WHATSAPP_OUTBOUND_ENABLED", "true").strip().lower() == "true"
+WHATSAPP_SESSION_WINDOW_SECONDS = int(os.getenv("WHATSAPP_SESSION_WINDOW_SECONDS", "86400"))
 # Delays are intentionally finite: 10s, 30s, then 90s by default.
 WHATSAPP_RQ_RETRY_INTERVALS = tuple(
     int(value.strip())

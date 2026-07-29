@@ -14,7 +14,6 @@ from app.core.config import (
     WHATSAPP_LOCAL_TEST_TENANT_FALLBACK,
 )
 from app.clients.whatsapp_client import WhatsAppClient
-from app.clients.gemini_client import GeminiClient
 from app.store.store import get_store
 from app.services.guardrails import scan_input, redact_pii, score_confidence, CONFIDENCE_THRESHOLD
 from app.core import database
@@ -22,6 +21,7 @@ from app.core.models import Lead, Client
 from app.services.rag import retrieve_context
 from app.services.usage import log_usage, estimate_tokens, check_limit, COST_PER_1K_INPUT_TOKENS, COST_PER_1K_OUTPUT_TOKENS
 from app.services import tenant
+from app.services import whatsapp_outbox
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,8 @@ def process_webhook_message(
     phone_number_id: str,
     message_data: dict,
     current_client_id: int | None = None,
+    inbound_event_id: str | None = None,
+    correlation_id: str | None = None,
 ):
     """
     Process a single inbound WhatsApp message end-to-end:
@@ -161,18 +163,41 @@ def process_webhook_message(
 
     # ── 4c. Input guardrails ─────────────────────────────────────────────
     is_safe, refusal = scan_input(user_text)
-    if not is_safe:
-        if refusal is None:
-            logger.error("Input guardrail blocked content without a refusal message")
-            return
-        logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
-        wamid = whatsapp.send_message(sender_phone, refusal)
-        if not wamid:
-            raise ValueError("WhatsApp provider did not accept the safe refusal")
-        store.append_message(
-            sender_phone, direction="outbound", message=refusal,
-            msg_type="text", wa_message_id=wamid, client_id=current_client_id,
+    if not is_safe and refusal is None:
+        logger.error("Input guardrail blocked content without a refusal message")
+        return
+    if inbound_event_id is not None:
+        whatsapp_outbox.record_inbound_opt_out(
+            client_id=current_client_id, recipient_phone=sender_phone, text=user_text
         )
+
+    # Phase 6: a worker event owns one durable reply intent. Legacy direct
+    # callers retain their previous behavior until they supply an event id.
+    intent_id = None
+    if inbound_event_id is not None:
+        intent_id = whatsapp_outbox.create_or_get_intent(
+            client_id=current_client_id, inbound_provider_event_id=inbound_event_id,
+            recipient_phone=sender_phone, correlation_id=correlation_id,
+        )
+        claim = whatsapp_outbox.claim_for_generation(intent_id=intent_id, client_id=current_client_id)
+        if claim == "dispatch":
+            whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=current_client_id)
+            return
+        if claim != "generate":
+            return
+
+    if not is_safe:
+        logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
+        if intent_id is None:
+            wamid = whatsapp.send_message(sender_phone, refusal)
+            if not wamid:
+                raise ValueError("WhatsApp provider did not accept the safe refusal")
+            store.append_message(sender_phone, direction="outbound", message=refusal, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
+        else:
+            whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=refusal)
+            result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
+            if result.newly_sent and result.provider_message_id:
+                store.append_message(sender_phone, direction="outbound", message=refusal, msg_type="text", wa_message_id=result.provider_message_id, client_id=current_client_id)
         return
 
     llm_text = redact_pii(user_text)
@@ -224,16 +249,17 @@ def process_webhook_message(
         return
 
     # ── 6. Send WhatsApp reply ───────────────────────────────────────────
-    wamid = whatsapp.send_message(sender_phone, ai_reply)
-    if not wamid:
-        # A rate/policy rejection is not a sent message. Raising makes the
-        # RQ wrapper dead-letter the permanent failure instead of recording a
-        # false outbound delivery.
-        raise ValueError("WhatsApp provider did not accept the outbound message")
-    store.append_message(
-        sender_phone, direction="outbound", message=ai_reply,
-        msg_type="text", wa_message_id=wamid, client_id=current_client_id,
-    )
+    if intent_id is None:
+        wamid = whatsapp.send_message(sender_phone, ai_reply)
+        if not wamid:
+            raise ValueError("WhatsApp provider did not accept the outbound message")
+        store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
+    else:
+        whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=ai_reply)
+        result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
+        wamid = result.provider_message_id
+        if result.newly_sent and wamid:
+            store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
 
     updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
 
@@ -258,6 +284,7 @@ def process_status_update(
     status_data: dict,
     current_client_id: int | None = None,
     phone_number_id: str | None = None,
+    require_known_intent: bool = False,
 ):
     """Process a WhatsApp message status update (delivered/read)."""
     ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
@@ -282,6 +309,11 @@ def process_status_update(
     wamid = status_data["id"]
     status_str = status_data["status"]
     logger.info(f"[RQ] Message {wamid} status: {status_str}")
+    if require_known_intent and not whatsapp_outbox.apply_provider_status(
+        client_id=current_client_id, provider_message_id=wamid, status=status_str,
+    ):
+        logger.warning("Rejected unknown or cross-tenant WhatsApp provider status", extra={"event": "unknown_provider_status"})
+        return
     store.update_message_status(wamid, status_str, client_id=current_client_id)
 
 

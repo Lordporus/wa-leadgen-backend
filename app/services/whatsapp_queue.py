@@ -11,7 +11,7 @@ from redis.exceptions import RedisError
 from requests.exceptions import RequestException
 from rq import Retry
 from rq.job import get_current_job
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.api.runtime import webhook_queue
 from app.core import database
@@ -77,7 +77,16 @@ def enqueue_event(*, kind: str, payload: dict[str, Any], phone_number_id: str, c
             receipt.state = "received"
             receipt.last_error = None
             receipt.dead_lettered_at = None
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            # Concurrent Meta delivery created the tenant-scoped receipt first.
+            # Reconcile it rather than rejecting a valid duplicate webhook.
+            session.rollback()
+            existing = session.query(WhatsAppWebhookEvent).filter_by(
+                client_id=client_id, event_kind=kind, event_id=event_id
+            ).one()
+            return existing.correlation_id
 
         envelope = {
             "event_id": receipt.event_id,
@@ -136,9 +145,15 @@ def process_webhook_event(envelope: dict[str, Any]) -> None:
         from app.services import jobs
 
         if kind == "message":
-            jobs.process_webhook_message(phone_number_id, payload, current_client_id=tenant_id)
+            jobs.process_webhook_message(
+                phone_number_id, payload, current_client_id=tenant_id,
+                inbound_event_id=event_id, correlation_id=envelope.get("correlation_id"),
+            )
         else:
-            jobs.process_status_update(payload, current_client_id=tenant_id, phone_number_id=phone_number_id)
+            jobs.process_status_update(
+                payload, current_client_id=tenant_id, phone_number_id=phone_number_id,
+                require_known_intent=True,
+            )
     except Exception as exc:
         if _is_retryable_error(exc):
             _mark_retry_or_dead_letter(tenant_id, kind, event_id, exc)
