@@ -10,6 +10,7 @@ from app.core.config import (
     WHATSAPP_VERIFY_TOKEN,
 )
 from app.services import tenant
+from app.services import whatsapp_policy
 
 router = APIRouter()
 
@@ -107,8 +108,7 @@ def _process_analytics_and_extraction_bg(
                 client_id=current_client_id,
             )
         elif score == "Cold":
-            decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
-            if any(word in user_text.lower() for word in decline_keywords):
+            if whatsapp_policy.is_opt_out_text(user_text):
                 lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
                 store.update_lead_status(
                     sender_phone,
@@ -122,17 +122,24 @@ def _process_analytics_and_extraction_bg(
     # 4. Lord Notification (Executed last, constraint #4)
     try:
         if score in req_won_stages:
-            if lord_phone:
-                norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
-                if store.get_lead(norm_lord, client_id=current_client_id):
-                    logger.error(
-                        f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an "
-                        f"existing lead record. Update LORD_PHONE_NUMBER in .env to avoid loop."
-                    )
-                else:
-                    whatsapp.send_message(lord_phone, f"🔥 HOT LEAD ALERT: Check Airtable for {lead_name} ({sender_phone})")
+            alert = whatsapp_policy.get_operator_template(
+                client_id=current_client_id, event="hot_lead"
+            )
+            if alert:
+                whatsapp_policy.send_immediate_template(
+                    client_id=current_client_id,
+                    phone=alert.phone,
+                    template_name=alert.name,
+                    language=alert.language,
+                    parameters=[lead_name, sender_phone, str(score)],
+                    recipient_kind="operator",
+                    sender=whatsapp.send_template,
+                    action="legacy_hot_lead_alert_send",
+                )
             else:
-                logger.info(f"🔥 HOT LEAD: {lead_name} {sender_phone}")
+                logger.warning(
+                    "Legacy hot-lead alert suppressed: tenant operator template is not configured"
+                )
     except Exception as e:
         logger.error(f"Lord notification failed in background: {e}")
 

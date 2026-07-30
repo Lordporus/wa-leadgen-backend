@@ -12,9 +12,21 @@ def test_send_message_propagates_retryable_provider_failure(monkeypatch):
     monkeypatch.setattr(client, "_check_rate_limit", lambda: True)
     monkeypatch.setattr(
         module.requests,
-        "post",
+        "request",
         lambda *args, **kwargs: (_ for _ in ()).throw(ConnectionError("offline")),
     )
+    credentials = module.WhatsAppTenantCredentials(
+        client_id=1,
+        access_token="offline-placeholder-token",
+        waba_id="waba-1",
+        phone_number_id="phone-1",
+        graph_api_version="v25.0",
+        request_timeout_seconds=5,
+    )
 
-    with pytest.raises(ConnectionError, match="offline"):
-        client.send_message("15550000000", "hello")
+    with pytest.raises(module.MetaTransportError, match="Meta request failed"):
+        client.send_message(
+            "15550000000",
+            "hello",
+            credentials=credentials,
+        )

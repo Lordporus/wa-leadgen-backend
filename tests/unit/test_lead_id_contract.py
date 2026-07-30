@@ -33,6 +33,15 @@ def _route(function):
     return inspect.unwrap(function)
 
 
+def _allow_policy_send(**kwargs):
+    provider_id = kwargs["sender"](kwargs["phone"], kwargs["text"])
+    return leads.whatsapp_policy.ImmediateSendResult(
+        state="sent",
+        reason_code="allowed",
+        provider_message_id=provider_id,
+    )
+
+
 def _record(record_id: str, *, phone: str = "919999999999", status: str = "New Lead"):
     return {
         "id": record_id,
@@ -194,6 +203,7 @@ def test_airtable_only_messages_takeover_and_release_use_list_id(monkeypatch):
     monkeypatch.setattr(leads, "SessionLocal", None)
     send = MagicMock(return_value="wamid.airtable-offline")
     monkeypatch.setattr(leads.whatsapp, "send_message", send)
+    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
 
     public_id = _route(leads.list_leads)(_request(), Response(), client, None)[0]["id"]
     messages = _route(leads.get_lead_messages)(
@@ -353,6 +363,7 @@ def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
     monkeypatch.setattr(leads, "SessionLocal", lambda: nullcontext(session))
     send = MagicMock(return_value="wamid.offline")
     monkeypatch.setattr(leads.whatsapp, "send_message", send)
+    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
 
     public_id = "recOfflineLead"
     messages = _route(leads.get_lead_messages)(
@@ -425,6 +436,7 @@ def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
     monkeypatch.setattr(leads, "SessionLocal", lambda: nullcontext(session))
     send = MagicMock(return_value="wamid.offline")
     monkeypatch.setattr(leads.whatsapp, "send_message", send)
+    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
 
     listed = _route(leads.list_leads)(_request(), Response(), client, None)
     public_id = listed[0]["id"]
@@ -486,11 +498,12 @@ def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
         {
             "phone": "919999999999",
             "client_id": 1,
-            "direction": "OUTBOUND",
-            "message": "Manual reply",
-            "msg_type": "human",
-        }
-    ]
+                "direction": "OUTBOUND",
+                "message": "Manual reply",
+                "msg_type": "human",
+                "wa_message_id": "wamid.offline",
+            }
+        ]
 
 
 def test_postgres_mode_rejects_airtable_id(monkeypatch):

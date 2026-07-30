@@ -14,7 +14,8 @@ works against Postgres data with zero changes:
     [YYYY-MM-DD HH:MM:SS] SYSTEM (system): <event note>
 """
 
-from datetime import datetime, date as date_type
+from datetime import datetime, date as date_type, timezone
+from uuid import uuid4
 from sqlalchemy import (
     Integer, String, Text, DateTime, Date, ForeignKey, Index, Boolean, Float,
     CheckConstraint, UniqueConstraint, text,
@@ -23,6 +24,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from app.core.database import Base
+
+
+def utc_now() -> datetime:
+    """Return an aware UTC timestamp for timezone-aware Phase 7 columns."""
+    return datetime.now(timezone.utc)
 
 
 class Client(Base):
@@ -53,6 +59,10 @@ class Client(Base):
 
     # ── Phase 8: per-client config ────────────────────────────────────────
     wa_phone_number_id: Mapped[str | None] = mapped_column(String(50),  nullable=True)
+    # Phase 7 provider ownership. Tokens remain in the process secret store;
+    # the tenant row holds only the environment-variable name.
+    wa_business_account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wa_access_token_env_var: Mapped[str | None] = mapped_column(String(100), nullable=True)
     system_prompt:      Mapped[str | None] = mapped_column(Text,        nullable=True)
     followup_template:  Mapped[str | None] = mapped_column(String(100), nullable=True)
     calendly_link:      Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -354,6 +364,173 @@ class WhatsAppOutboundIntent(Base):
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped["Client"] = relationship()
+
+
+class WhatsAppConsentRecord(Base):
+    """Current tenant-scoped proof of WhatsApp consent for one phone."""
+
+    __tablename__ = "whatsapp_consent_records"
+    __table_args__ = (
+        UniqueConstraint("client_id", "phone", name="uq_whatsapp_consent_client_phone"),
+        Index("idx_whatsapp_consent_lookup", "client_id", "phone", "revoked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evidence_reference: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class WhatsAppOptOut(Base):
+    """Durable do-not-contact state. Consent writes never delete this row."""
+
+    __tablename__ = "whatsapp_opt_outs"
+    __table_args__ = (
+        UniqueConstraint("client_id", "phone", name="uq_whatsapp_opt_out_client_phone"),
+        Index("idx_whatsapp_opt_out_lookup", "client_id", "phone"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    opted_out_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    inbound_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
+class WhatsAppTenantPolicy(Base):
+    """Tenant-owned WhatsApp contact limits and outbound kill switch."""
+
+    __tablename__ = "whatsapp_tenant_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    outbound_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="UTC", server_default="UTC"
+    )
+    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    frequency_window_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3600, server_default="3600"
+    )
+    max_messages_per_window: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    daily_cap: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=50, server_default="50"
+    )
+    excluded_lead_stages: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=lambda: ["Booked", "Lost"]
+    )
+    policy_version: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="phase7-v1", server_default="phase7-v1"
+    )
+    hot_lead_template_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    hot_lead_template_language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    booking_alert_template_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    booking_alert_template_language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class WhatsAppTemplate(Base):
+    """Tenant registry entry for a Meta-approved WhatsApp template version."""
+
+    __tablename__ = "whatsapp_templates"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_id", "name", "language", "version",
+            name="uq_whatsapp_template_version",
+        ),
+        Index(
+            "idx_whatsapp_template_approved",
+            "client_id", "name", "language", "approval_status", "retired_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    language: Mapped[str] = mapped_column(String(20), nullable=False)
+    category: Mapped[str] = mapped_column(String(30), nullable=False)
+    variables: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    approval_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    meta_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    verification_reference: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    meta_template_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    verified_waba_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    verified_phone_number_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    meta_variable_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    component_signature: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WhatsAppPolicyDecision(Base):
+    """Content-minimised audit record for every WhatsApp policy outcome."""
+
+    __tablename__ = "whatsapp_policy_decisions"
+    __table_args__ = (
+        Index("idx_whatsapp_policy_audit_tenant_time", "client_id", "created_at"),
+        Index("idx_whatsapp_policy_audit_phone_time", "client_id", "phone", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    audit_key: Mapped[str] = mapped_column(
+        String(36), unique=True, nullable=False, default=lambda: str(uuid4())
+    )
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False
+    )
+    phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    session_open: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("whatsapp_templates.id", ondelete="SET NULL"), nullable=True
+    )
+    outbound_intent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("whatsapp_outbound_intents.id", ondelete="SET NULL"), nullable=True
+    )
+    override_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provider_outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    provider_failure_category: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class PipelineStage(Base):

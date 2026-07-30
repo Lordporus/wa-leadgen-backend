@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 from app.core import database
 from app.core.models import Client
@@ -33,6 +34,11 @@ def test_inbound_fallback_uses_session_factory_initialized_after_jobs_import(
     monkeypatch.setattr(jobs.tenant, "get_gemini_for_client", lambda _client: MagicMock())
     monkeypatch.setattr(jobs.tenant, "get_won_stage_names", lambda _client_id: [])
     monkeypatch.setattr(jobs.tenant, "get_lost_stage_names", lambda _client_id: [])
+    monkeypatch.setattr(
+        jobs.whatsapp_policy,
+        "preflight_text",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason_code="allowed"),
+    )
     monkeypatch.setattr(
         jobs,
         "check_limit",

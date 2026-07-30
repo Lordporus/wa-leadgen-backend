@@ -12,6 +12,14 @@ WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID")
 WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
 WHATSAPP_SIMULATE_HUMAN_DELAY = os.getenv("WHATSAPP_SIMULATE_HUMAN_DELAY", "false").lower() == "true"
+# One centrally selected, currently supported Meta Graph API version.
+WHATSAPP_GRAPH_API_VERSION = (
+    os.getenv("WHATSAPP_GRAPH_API_VERSION", "v25.0").strip() or "v25.0"
+)
+WHATSAPP_META_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv("WHATSAPP_META_REQUEST_TIMEOUT_SECONDS", "10")
+)
+WHATSAPP_META_MAX_PAGES = int(os.getenv("WHATSAPP_META_MAX_PAGES", "100"))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -33,7 +41,7 @@ LORD_PHONE_NUMBER = os.getenv("LORD_PHONE_NUMBER")
 #   "airtable" (default) → Airtable only           (pre-migration, safe)
 #   "dual"               → write both, read Airtable (shadow phase)
 #   "postgres"           → Postgres only            (post-cutover)
-MIGRATION_MODE = os.getenv("MIGRATION_MODE", "airtable")
+MIGRATION_MODE = os.getenv("MIGRATION_MODE", "airtable").strip().lower()
 # Never enable in deployed environments. This preserves isolated legacy
 # fixtures only; WhatsApp production jobs must resolve a tenant by phone ID.
 WHATSAPP_LOCAL_TEST_TENANT_FALLBACK = (
@@ -87,7 +95,26 @@ WHATSAPP_RQ_CONSUMER_ENABLED = (
     os.getenv("WHATSAPP_RQ_CONSUMER_ENABLED", "true").strip().lower() == "true"
 )
 WHATSAPP_OUTBOUND_ENABLED = os.getenv("WHATSAPP_OUTBOUND_ENABLED", "true").strip().lower() == "true"
-WHATSAPP_SESSION_WINDOW_SECONDS = int(os.getenv("WHATSAPP_SESSION_WINDOW_SECONDS", "86400"))
+MAX_WHATSAPP_SESSION_WINDOW_SECONDS = 86400
+
+
+def _validated_whatsapp_session_window(raw_value: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "WHATSAPP_SESSION_WINDOW_SECONDS must be an integer from 1 to 86400"
+        ) from exc
+    if not 1 <= value <= MAX_WHATSAPP_SESSION_WINDOW_SECONDS:
+        raise RuntimeError(
+            "WHATSAPP_SESSION_WINDOW_SECONDS must be an integer from 1 to 86400"
+        )
+    return value
+
+
+WHATSAPP_SESSION_WINDOW_SECONDS = _validated_whatsapp_session_window(
+    os.getenv("WHATSAPP_SESSION_WINDOW_SECONDS", "86400")
+)
 # Delays are intentionally finite: 10s, 30s, then 90s by default.
 WHATSAPP_RQ_RETRY_INTERVALS = tuple(
     int(value.strip())

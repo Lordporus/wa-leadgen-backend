@@ -21,6 +21,8 @@ router = APIRouter()
 class AdminCreateClientBody(BaseModel):
     name: str
     wa_phone_number_id: str
+    wa_business_account_id: str | None = None
+    wa_access_token_env_var: str | None = None
     system_prompt: str | None = None
     calendly_link: str | None = None
     followup_template: str | None = None
@@ -78,6 +80,8 @@ def admin_create_client(request: Request, response: Response, body: AdminCreateC
         new_client = Client(
             name=body.name,
             wa_phone_number_id=body.wa_phone_number_id,
+            wa_business_account_id=body.wa_business_account_id,
+            wa_access_token_env_var=body.wa_access_token_env_var,
             system_prompt=body.system_prompt,
             calendly_link=body.calendly_link,
             followup_template=body.followup_template or "",

@@ -13,6 +13,10 @@ def test_uncertain_provider_failures_are_never_safe_to_resend():
 
     response.status_code = 400
     assert whatsapp_outbox._is_uncertain_provider_error(HTTPError(response=response)) is False
+    assert whatsapp_outbox._send_failure_is_uncertain(
+        RuntimeError("database commit failed"),
+        provider_accepted=True,
+    ) is True
 
 
 def test_status_order_is_monotonic():
@@ -69,16 +73,22 @@ def test_crashed_generation_recovers_or_dispatches_persisted_body(monkeypatch):
 
 
 def test_opt_out_is_persisted_before_any_outbound_claim(monkeypatch):
-    lead = type("Lead", (), {"whatsapp_opted_out_at": None})()
-    class Query:
-        def filter_by(self, **_): return self
-        def with_for_update(self): return self
-        def one_or_none(self): return lead
-    class Session:
-        def __enter__(self): return self
-        def __exit__(self, *_): return False
-        def query(self, _): return Query()
-        def commit(self): pass
-    monkeypatch.setattr(whatsapp_outbox.database, "SessionLocal", Session)
-    whatsapp_outbox.record_inbound_opt_out(client_id=7, recipient_phone="1555", text="STOP")
-    assert lead.whatsapp_opted_out_at is not None
+    calls = []
+
+    def record(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(whatsapp_outbox.whatsapp_policy, "record_inbound_opt_out", record)
+    assert whatsapp_outbox.record_inbound_opt_out(
+        client_id=7,
+        recipient_phone="1555",
+        text="STOP",
+        inbound_event_id="wamid.inbound",
+    )
+    assert calls == [{
+        "client_id": 7,
+        "phone": "1555",
+        "text": "STOP",
+        "inbound_event_id": "wamid.inbound",
+    }]
