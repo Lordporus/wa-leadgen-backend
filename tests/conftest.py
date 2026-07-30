@@ -32,6 +32,7 @@ _OFFLINE_ENV = {
     "WHATSAPP_APP_SECRET": "offline-test-secret",
     "WHATSAPP_BUSINESS_ACCOUNT_ID": "",
     "WHATSAPP_PHONE_NUMBER_ID": "",
+    "WHATSAPP_TEST_TENANT_TOKEN": "offline-placeholder-token",
     "WHATSAPP_VERIFY_TOKEN": "offline-test-token",
 }
 for _name, _value in _OFFLINE_ENV.items():
@@ -67,7 +68,13 @@ def block_external_network(monkeypatch):
     from app.clients.gemini_client import GeminiClient
     from app.clients.whatsapp_client import WhatsAppClient
 
-    for method_name in ("send_message", "send_template", "submit_template", "get_template"):
+    for method_name in (
+        "send_message",
+        "send_template",
+        "submit_template",
+        "get_template",
+        "verify_template",
+    ):
         monkeypatch.setattr(WhatsAppClient, method_name, _blocked)
 
     for method_name in (

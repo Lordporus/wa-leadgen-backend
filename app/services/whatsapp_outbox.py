@@ -9,9 +9,10 @@ from typing import Callable
 from requests.exceptions import RequestException
 from sqlalchemy.exc import IntegrityError
 
+from app.clients.whatsapp_client import MetaTransportError
 from app.core import database
-from app.core.config import WHATSAPP_OUTBOUND_ENABLED, WHATSAPP_SESSION_WINDOW_SECONDS
-from app.core.models import Lead, Message, WhatsAppOutboundIntent, WhatsAppWebhookEvent
+from app.core.models import Client, Lead, Message, WhatsAppOutboundIntent, WhatsAppWebhookEvent
+from app.services import whatsapp_policy
 
 
 class OutboundIntentError(RuntimeError):
@@ -89,14 +90,16 @@ def intent_body(*, intent_id: int, client_id: int) -> tuple[str, str]:
         return intent.recipient_phone, intent.body
 
 
-def record_inbound_opt_out(*, client_id: int, recipient_phone: str, text: str) -> None:
-    if text.strip().lower() not in {"stop", "unsubscribe", "cancel", "opt out", "opt-out"} or database.SessionLocal is None:
-        return
-    with database.SessionLocal() as session:
-        lead = session.query(Lead).filter_by(client_id=client_id, phone=recipient_phone).with_for_update().one_or_none()
-        if lead is not None:
-            lead.whatsapp_opted_out_at = datetime.utcnow()
-            session.commit()
+def record_inbound_opt_out(
+    *, client_id: int, recipient_phone: str, text: str,
+    inbound_event_id: str | None = None,
+) -> bool:
+    return whatsapp_policy.record_inbound_opt_out(
+        client_id=client_id,
+        phone=recipient_phone,
+        text=text,
+        inbound_event_id=inbound_event_id,
+    )
 
 
 def set_generated_body(*, intent_id: int, client_id: int, body: str) -> None:
@@ -110,8 +113,13 @@ def set_generated_body(*, intent_id: int, client_id: int, body: str) -> None:
         session.commit()
 
 
-def dispatch_intent(*, intent_id: int, client_id: int, sender: Callable[[str, str], str | None]) -> DispatchResult:
-    """Claim, send, and persist one intent; never resend an uncertain outcome."""
+def dispatch_intent(
+    *,
+    intent_id: int,
+    client_id: int,
+    sender: Callable[..., str | None],
+) -> DispatchResult:
+    """Claim, policy-check, send, and persist once without unsafe retries."""
     if database.SessionLocal is None:
         raise OutboundIntentError("WhatsApp outbox requires the durable database")
     with database.SessionLocal() as session:
@@ -131,56 +139,99 @@ def dispatch_intent(*, intent_id: int, client_id: int, sender: Callable[[str, st
             return DispatchResult("unknown")
         if intent.state != "generating" or not intent.body:
             return DispatchResult(intent.state)
-        lead = session.query(Lead).filter_by(client_id=client_id, phone=intent.recipient_phone).with_for_update().one_or_none()
-        if lead is None:
-            raise OutboundIntentError("Outbound recipient is not a tenant lead")
-        event = session.query(WhatsAppWebhookEvent).filter_by(id=intent.inbound_event_id, client_id=client_id).one()
-        timestamp = event.payload.get("timestamp") if isinstance(event.payload, dict) else None
-        try:
-            session_open = isinstance(timestamp, str) and datetime.utcnow().timestamp() - int(timestamp) <= WHATSAPP_SESSION_WINDOW_SECONDS
-        except (TypeError, ValueError):
-            session_open = False
-        if not WHATSAPP_OUTBOUND_ENABLED or lead.is_human_takeover or lead.whatsapp_opted_out_at or not session_open:
-            intent.state = "blocked"
-            intent.failure_category = "policy_blocked"
-            intent.failure_reason = "Outbound disabled, opt-out/takeover active, or no open session/template policy"
-            session.commit()
-            return DispatchResult("blocked")
+        # Persist the uncertain-send boundary before the provider call. A
+        # crash after this commit remains non-retryable, preserving Phase 6.
         intent.state = "sending"
         intent.attempt_count += 1
         intent.claimed_at = datetime.utcnow()
-        recipient, body = intent.recipient_phone, intent.body
         session.commit()
 
+    provider_accepted = False
+    decision: whatsapp_policy.PolicyDecision | None = None
     try:
-        provider_message_id = sender(recipient, body)
-    except RequestException as exc:
-        _record_send_failure(intent_id, client_id, exc, uncertain=_is_uncertain_provider_error(exc))
-        raise
-    except Exception as exc:
-        _record_send_failure(intent_id, client_id, exc, uncertain=False)
-        raise
-    if not provider_message_id:
-        exc = OutboundIntentError("WhatsApp provider did not accept the outbound message")
-        _record_send_failure(intent_id, client_id, exc, uncertain=False)
-        raise exc
-
-    # This transaction is the durable boundary after a provider response. If it
-    # fails, a retry observes `sending` and moves to `unknown`, never resending.
-    with database.SessionLocal() as session:
-        intent = session.query(WhatsAppOutboundIntent).filter_by(id=intent_id, client_id=client_id).with_for_update().one()
-        intent.provider_message_id = provider_message_id
-        intent.provider_status = "sent"
-        intent.state = "sent"
-        intent.sent_at = datetime.utcnow()
-        lead = session.query(Lead).filter_by(client_id=client_id, phone=intent.recipient_phone).one()
-        if session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none() is None:
-            session.add(Message(
-                lead_id=lead.id, direction="OUTBOUND", msg_type="text", body=intent.body,
-                wa_message_id=provider_message_id, channel="whatsapp", status="sent",
+        # This second transaction locks tenant + lead through the provider
+        # call. Inbound opt-out uses the same locks, so the final policy check
+        # and opt-out are serialized without weakening Phase 6 idempotency.
+        with database.SessionLocal() as session:
+            intent = session.query(WhatsAppOutboundIntent).filter_by(
+                id=intent_id, client_id=client_id
+            ).with_for_update().one()
+            client = session.query(Client).filter_by(id=client_id).with_for_update().one()
+            lead = session.query(Lead).filter_by(
+                client_id=client_id, phone=intent.recipient_phone
+            ).with_for_update().one_or_none()
+            if lead is None:
+                raise OutboundIntentError("Outbound recipient is not a tenant lead")
+            credentials = whatsapp_policy.tenant_meta_credentials(client)
+            decision = whatsapp_policy.evaluate_locked(
+                session,
+                client=client,
+                lead=lead,
+                action="queued_reply_send",
+                message_type="text",
                 outbound_intent_id=intent.id,
-            ))
-        session.commit()
+                correlation_id=intent.correlation_id,
+                credentials=credentials,
+            )
+            if not decision.allowed:
+                intent.state = "blocked"
+                intent.failure_category = "policy_blocked"
+                intent.failure_reason = decision.reason_code
+                whatsapp_policy.set_provider_audit_outcome(
+                    session,
+                    decision,
+                    outcome="blocked",
+                )
+                session.commit()
+                return DispatchResult("blocked")
+
+            if not intent.body:
+                raise OutboundIntentError("Outbound intent lost its persisted reply text")
+            session.flush()
+            provider_message_id = sender(
+                intent.recipient_phone,
+                intent.body,
+                credentials=credentials,
+            )
+            if not provider_message_id:
+                raise OutboundIntentError("WhatsApp provider did not accept the outbound message")
+            provider_accepted = True
+
+            intent.provider_message_id = provider_message_id
+            intent.provider_status = "sent"
+            intent.state = "sent"
+            intent.sent_at = datetime.utcnow()
+            whatsapp_policy.set_provider_audit_outcome(
+                session,
+                decision,
+                outcome="accepted",
+            )
+            if session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none() is None:
+                session.add(Message(
+                    lead_id=lead.id, direction="OUTBOUND", msg_type="text", body=intent.body,
+                    wa_message_id=provider_message_id, channel="whatsapp", status="sent",
+                    outbound_intent_id=intent.id,
+                ))
+            session.commit()
+    except Exception as exc:
+        if decision is not None and decision.allowed:
+            whatsapp_policy.persist_policy_decision(
+                decision,
+                provider_outcome=(
+                    "accepted_uncommitted" if provider_accepted else "failed"
+                ),
+                failure_category=whatsapp_policy.classify_provider_failure(
+                    exc,
+                    provider_accepted=provider_accepted,
+                ),
+            )
+        _record_send_failure(
+            intent_id,
+            client_id,
+            exc,
+            uncertain=_send_failure_is_uncertain(exc, provider_accepted=provider_accepted),
+        )
+        raise
     return DispatchResult("sent", provider_message_id, True)
 
 
@@ -201,6 +252,14 @@ def _is_uncertain_provider_error(error: RequestException) -> bool:
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
     return response is None or status is None or status >= 500
+
+
+def _send_failure_is_uncertain(error: Exception, *, provider_accepted: bool) -> bool:
+    if provider_accepted:
+        return True
+    if isinstance(error, MetaTransportError):
+        return True
+    return isinstance(error, RequestException) and _is_uncertain_provider_error(error)
 
 
 def apply_provider_status(*, client_id: int, provider_message_id: str, status: str) -> bool:

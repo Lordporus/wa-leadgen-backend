@@ -357,6 +357,11 @@ def test_dual_takeover_state_is_visible_to_worker_read_primary(monkeypatch):
         "resolve_context_by_phone_id",
         lambda phone_number_id: context,
     )
+    monkeypatch.setattr(
+        jobs.whatsapp_policy,
+        "preflight_text",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason_code="allowed"),
+    )
 
     jobs.process_webhook_message(
         "offline-phone-number-id",
@@ -376,6 +381,67 @@ def test_dual_takeover_state_is_visible_to_worker_read_primary(monkeypatch):
     )
 
 
+def test_dual_takeover_reports_postgres_mirror_failure_and_stays_blocked():
+    store, primary, secondary = _dual_store()
+    primary.get_lead.return_value["fields"]["is_human_takeover"] = False
+    secondary.update_human_takeover_by_id.side_effect = RuntimeError(
+        "offline Postgres failure"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="could not be confirmed by the policy store",
+    ):
+        store.update_human_takeover_by_id(
+            "recOffline",
+            True,
+            client_id=7,
+        )
+
+    assert primary.get_lead.return_value["fields"]["is_human_takeover"] is True
+
+
+def test_clear_decline_is_persisted_before_ai_generation(monkeypatch):
+    store, primary, _secondary = _dual_store()
+    context = SimpleNamespace(
+        client=SimpleNamespace(id=7),
+        gemini=MagicMock(),
+        won_stages=["Booked"],
+        lost_stages=["Lost"],
+    )
+    order = []
+    monkeypatch.setattr(jobs, "get_store", lambda: store)
+    monkeypatch.setattr(
+        jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: context
+    )
+    monkeypatch.setattr(
+        jobs.whatsapp_outbox,
+        "record_inbound_opt_out",
+        lambda **_kwargs: order.append("opt_out") or True,
+    )
+    monkeypatch.setattr(
+        jobs.whatsapp_policy,
+        "preflight_text",
+        lambda **_kwargs: pytest.fail("preflight must follow and be skipped by opt-out"),
+    )
+
+    jobs.process_webhook_message(
+        "offline-phone-number-id",
+        {
+            "id": "wamid.unsubscribe",
+            "from": "919999999999",
+            "type": "text",
+            "text": {"body": "unsubscribe me"},
+        },
+    )
+
+    assert order == ["opt_out"]
+    context.gemini.generate_response_with_history.assert_not_called()
+    primary.update_lead_status.assert_called_once_with(
+        "919999999999", "Lost", client_id=7
+    )
+
+
 def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
     store, primary, secondary = _dual_store()
     context = SimpleNamespace(
@@ -389,6 +455,11 @@ def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
         jobs.tenant,
         "resolve_context_by_phone_id",
         lambda phone_number_id: context,
+    )
+    monkeypatch.setattr(
+        jobs.whatsapp_policy,
+        "preflight_text",
+        lambda **_kwargs: SimpleNamespace(allowed=True, reason_code="allowed"),
     )
 
     jobs.process_webhook_message(

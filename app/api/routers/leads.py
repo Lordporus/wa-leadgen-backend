@@ -9,8 +9,9 @@ from app.api.dependencies import get_client_key, limiter, require_api_key
 from app.api.runtime import logger, store, whatsapp
 from app.core.config import LEGACY_LEAD_ID_COMPAT_ENABLED
 from app.core.database import SessionLocal
-from app.core.models import Client, EmailSuppression, Lead, Message
+from app.core.models import Client, EmailSuppression, Lead
 from app.email.email_validation import validate_lead_email
+from app.services import whatsapp_policy
 from app.store.db_client import DatabaseClient
 
 router = APIRouter()
@@ -673,8 +674,23 @@ def send_human_message(request: Request, response: Response, lead_id: str, body:
         raise HTTPException(status_code=400, detail="Lead has no phone number on file")
 
     try:
-        whatsapp.send_message(phone, body.message)
-    except Exception as e:
+        result = whatsapp_policy.send_immediate_text(
+            client_id=client.id,
+            phone=phone,
+            text=body.message,
+            sender=whatsapp.send_message,
+            action="human_manual_send",
+            allow_human_takeover=True,
+        )
+        if result.state != "sent" or not result.provider_message_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"WhatsApp policy blocked this message: {result.reason_code}",
+            )
+        provider_message_id = result.provider_message_id
+    except HTTPException:
+        raise
+    except Exception:
         logger.error("Failed to send manual message", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to send WhatsApp message")
 
@@ -684,6 +700,7 @@ def send_human_message(request: Request, response: Response, lead_id: str, body:
         direction="OUTBOUND",
         message=body.message,
         msg_type="human",
+        wa_message_id=provider_message_id,
     )
     return {"success": True}
 

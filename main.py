@@ -24,17 +24,17 @@ from app.api.routers import (
     leads,
     settings,
     whatsapp as whatsapp_routes,
+    whatsapp_policy as whatsapp_policy_routes,
 )
 from app.api.runtime import calendly, logger, store, whatsapp
 from app.core.config import (
     CLIENT_ID,
     FOLLOWUP_TEMPLATE_NAME,
-    LORD_PHONE_NUMBER,
     WHATSAPP_APP_SECRET,
 )
-from app.core.database import is_configured
 from app.services import analytics as analytics_service
 from app.services import tenant
+from app.services import whatsapp_policy
 
 
 def follow_up_job():
@@ -77,11 +77,22 @@ def _process_followups_for_client(client_id: int, template_name: str):
                 phone = r.get("fields", {}).get("Phone number type")
                 if template_name:
                     logger.info(f"Follow-up eligible: {phone} (Client {client_id}). Sending template '{template_name}'.")
-                    whatsapp.send_template(phone, template_name)
-                    store.append_message(phone, direction="outbound",
-                                         message=f"[template: {template_name}]",
-                                         msg_type="template",
-                                         client_id=client_id)
+                    result = whatsapp_policy.send_immediate_template(
+                        client_id=client_id,
+                        phone=phone,
+                        template_name=template_name,
+                        language="en",
+                        sender=whatsapp.send_template,
+                        action="follow_up_template_send",
+                    )
+                    if result.state == "sent" and result.provider_message_id:
+                        store.append_message(
+                            phone, direction="outbound",
+                            message=f"[template: {template_name}]",
+                            msg_type="template",
+                            wa_message_id=result.provider_message_id,
+                            client_id=client_id,
+                        )
                 else:
                     logger.info(
                         f"[DRY-RUN] Lead {phone} (Client {client_id}) eligible for follow-up (Contacted > 48h). "
@@ -121,16 +132,30 @@ def calendly_sync_job():
                     client_id=matched_client_id,
                 )
                 
-                admin_phone = LORD_PHONE_NUMBER
-                if is_configured():
-                    client_row = tenant.load_client(matched_client_id)
-                    if client_row and client_row.admin_phone:
-                        admin_phone = client_row.admin_phone
-                        
-                if admin_phone:
-                    whatsapp.send_message(admin_phone, f"📅 BOOKED: {booking.get('name')} booked a call for {booking.get('start_time')}")
+                alert = whatsapp_policy.get_operator_template(
+                    client_id=matched_client_id, event="booking"
+                )
+                if alert:
+                    try:
+                        whatsapp_policy.send_immediate_template(
+                            client_id=matched_client_id,
+                            phone=alert.phone,
+                            template_name=alert.name,
+                            language=alert.language,
+                            parameters=[
+                                str(booking.get("name") or ""),
+                                str(booking.get("start_time") or ""),
+                            ],
+                            recipient_kind="operator",
+                            sender=whatsapp.send_template,
+                            action="booking_alert_send",
+                        )
+                    except whatsapp_policy.WhatsAppPolicyError as exc:
+                        logger.warning("Booking WhatsApp alert blocked: %s", exc)
                 else:
-                    logger.warning(f"Booking matched, but neither admin_phone nor LORD_PHONE_NUMBER is configured. Alert suppressed for lead {phone}.")
+                    logger.warning(
+                        "Booking alert suppressed: tenant operator template is not configured"
+                    )
             else:
                 logger.info(f"Matched booking for {phone} but lead status is {current_status}, skipping update.")
         else:
@@ -200,4 +225,5 @@ app.include_router(documents.router)
 app.include_router(billing.router)
 app.include_router(health.router)
 app.include_router(whatsapp_routes.router)
+app.include_router(whatsapp_policy_routes.router)
 app.include_router(analytics.router)

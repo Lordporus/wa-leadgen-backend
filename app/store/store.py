@@ -225,7 +225,7 @@ class DualWriteStore:
         enabled: bool,
         client_id: int,
     ) -> dict | None:
-        """Update the read-primary first, then mirror the same scoped lead."""
+        """Update the read-primary, then require the policy-store mirror."""
         if client_id is None:
             return None
         result = self._primary.update_human_takeover_by_id(
@@ -234,25 +234,70 @@ class DualWriteStore:
             client_id=client_id,
         )
         phone = (result or {}).get("fields", {}).get("Phone number type")
-        if phone:
-            def mirror_to_secondary():
-                secondary_record = self._secondary.get_lead(
-                    phone,
-                    client_id=client_id,
-                )
-                if secondary_record:
-                    self._secondary.update_human_takeover_by_id(
-                        secondary_record["id"],
-                        enabled,
+        if result is None:
+            return None
+        if not enabled:
+            if phone:
+                def mirror_release_to_secondary():
+                    secondary_record = self._secondary.get_lead(
+                        phone,
                         client_id=client_id,
                     )
+                    if secondary_record:
+                        self._secondary.update_human_takeover_by_id(
+                            secondary_record["id"],
+                            False,
+                            client_id=client_id,
+                        )
 
-            self._safe(
-                mirror_to_secondary,
-                "update_human_takeover_by_id",
-                client_id,
-                reference=phone,
+                self._safe(
+                    mirror_release_to_secondary,
+                    "update_human_takeover_by_id",
+                    client_id,
+                    reference=phone,
+                )
+            return result
+        try:
+            if not phone:
+                raise RuntimeError(
+                    "Takeover update did not identify a tenant lead phone"
+                )
+            secondary_record = self._secondary.get_lead(
+                phone,
+                client_id=client_id,
             )
+            if not secondary_record:
+                raise RuntimeError(
+                    "Postgres takeover recipient is missing"
+                )
+            mirrored = self._secondary.update_human_takeover_by_id(
+                secondary_record["id"],
+                enabled,
+                client_id=client_id,
+            )
+            if not mirrored:
+                raise RuntimeError(
+                    "Postgres takeover state was not durably updated"
+                )
+        except Exception as error:
+            logger.error(
+                "[DualWrite] Required Postgres takeover write failed",
+                extra={
+                    "event": "dual_write_failed",
+                    "operation": "update_human_takeover_by_id",
+                    "client_id": client_id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            self._record_failure(
+                operation="update_human_takeover_by_id",
+                client_id=client_id,
+                reference=phone,
+                error=error,
+            )
+            raise RuntimeError(
+                "Human takeover could not be confirmed by the policy store"
+            ) from error
         return result
 
     def append_message(
@@ -428,7 +473,7 @@ class DualWriteStore:
 _store: LeadStore | None = None
 
 def get_primary_store():
-    mode = (MIGRATION_MODE or "airtable").lower()
+    mode = MIGRATION_MODE or "airtable"
     if mode in ["postgres", "dual"]:
         from app.store.db_client import DatabaseClient
         return DatabaseClient()
@@ -436,7 +481,7 @@ def get_primary_store():
     return AirtableClient()
 
 def get_secondary_store():
-    mode = (MIGRATION_MODE or "airtable").lower()
+    mode = MIGRATION_MODE or "airtable"
     if mode == "dual":
         from app.clients.airtable_client import AirtableClient
         return AirtableClient()
@@ -453,7 +498,7 @@ def get_store():
     if _store is not None:
         return _store
 
-    mode = (MIGRATION_MODE or "airtable").lower()
+    mode = MIGRATION_MODE or "airtable"
 
     if mode == "postgres":
         from app.store.db_client import DatabaseClient

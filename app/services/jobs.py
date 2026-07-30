@@ -22,6 +22,7 @@ from app.services.rag import retrieve_context
 from app.services.usage import log_usage, estimate_tokens, check_limit, COST_PER_1K_INPUT_TOKENS, COST_PER_1K_OUTPUT_TOKENS
 from app.services import tenant
 from app.services import whatsapp_outbox
+from app.services import whatsapp_policy
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,32 @@ def process_webhook_message(
         logger.info(f"Duplicate webhook skipped | wamid: {msg_id} | phone: {sender_phone}")
         return
 
+    # Phase 7: STOP/decline intent becomes durable before stage updates,
+    # takeover checks, usage checks, guardrails, or AI generation.
+    if whatsapp_outbox.record_inbound_opt_out(
+        client_id=current_client_id,
+        recipient_phone=sender_phone,
+        text=user_text,
+        inbound_event_id=inbound_event_id,
+    ):
+        lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
+        store.update_lead_status(
+            sender_phone,
+            lost_stage,
+            client_id=current_client_id,
+        )
+        logger.info("Durable WhatsApp opt-out recorded; automated reply suppressed")
+        return
+
+    preflight = whatsapp_policy.preflight_text(
+        client_id=current_client_id,
+        phone=sender_phone,
+        correlation_id=correlation_id,
+    )
+    if not preflight.allowed:
+        logger.info("WhatsApp reply suppressed by preflight policy: %s", preflight.reason_code)
+        return
+
     current_status = lead.get("fields", {}).get("Status", "New Lead")
     if current_status == "New Lead":
         store.update_lead_status(sender_phone, "Contacted", client_id=current_client_id)
@@ -166,11 +193,6 @@ def process_webhook_message(
     if not is_safe and refusal is None:
         logger.error("Input guardrail blocked content without a refusal message")
         return
-    if inbound_event_id is not None:
-        whatsapp_outbox.record_inbound_opt_out(
-            client_id=current_client_id, recipient_phone=sender_phone, text=user_text
-        )
-
     # Phase 6: a worker event owns one durable reply intent. Legacy direct
     # callers retain their previous behavior until they supply an event id.
     intent_id = None
@@ -190,10 +212,20 @@ def process_webhook_message(
         assert refusal is not None
         logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
         if intent_id is None:
-            wamid = whatsapp.send_message(sender_phone, refusal)
-            if not wamid:
-                raise ValueError("WhatsApp provider did not accept the safe refusal")
-            store.append_message(sender_phone, direction="outbound", message=refusal, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
+            send_result = whatsapp_policy.send_immediate_text(
+                client_id=current_client_id,
+                phone=sender_phone,
+                text=refusal,
+                sender=whatsapp.send_message,
+                action="guardrail_refusal_send",
+                correlation_id=correlation_id,
+            )
+            if send_result.state == "sent" and send_result.provider_message_id:
+                store.append_message(
+                    sender_phone, direction="outbound", message=refusal,
+                    msg_type="text", wa_message_id=send_result.provider_message_id,
+                    client_id=current_client_id,
+                )
         else:
             whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=refusal)
             result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
@@ -251,16 +283,30 @@ def process_webhook_message(
 
     # ── 6. Send WhatsApp reply ───────────────────────────────────────────
     if intent_id is None:
-        wamid = whatsapp.send_message(sender_phone, ai_reply)
-        if not wamid:
-            raise ValueError("WhatsApp provider did not accept the outbound message")
-        store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
+        send_result = whatsapp_policy.send_immediate_text(
+            client_id=current_client_id,
+            phone=sender_phone,
+            text=ai_reply,
+            sender=whatsapp.send_message,
+            action="legacy_ai_reply_send",
+            correlation_id=correlation_id,
+        )
+        wamid = send_result.provider_message_id
+        if send_result.state == "sent" and wamid:
+            store.append_message(
+                sender_phone, direction="outbound", message=ai_reply,
+                msg_type="text", wa_message_id=wamid, client_id=current_client_id,
+            )
+        else:
+            return
     else:
         whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=ai_reply)
         result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
         wamid = result.provider_message_id
         if result.newly_sent and wamid:
             store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
+        elif result.state != "sent":
+            return
 
     updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
 
@@ -366,27 +412,32 @@ def _run_analytics(
                 
                 # Check for alert
                 if string_score == "Hot" and not lead.notified_hot_at:
-                    lord_phone = LORD_PHONE_NUMBER
-                    if lord_phone:
-                        norm_lord = lord_phone.replace('+', '').replace(' ', '').replace('-', '')
-                        if store.get_lead(norm_lord, client_id=current_client_id):
-                            logger.error(f"ALERT SUPPRESSED: LORD_PHONE_NUMBER ({lord_phone}) matches an existing lead record.")
-                        else:
-                            whatsapp.send_message(
-                                lord_phone, 
-                                f"🔥 HOT LEAD ALERT: Check dashboard for {lead_name} ({sender_phone})\nScore: {numeric_score}/{threshold}\nSignals: {score_data.get('summary', '')}"
-                            )
+                    alert = whatsapp_policy.get_operator_template(
+                        client_id=current_client_id, event="hot_lead"
+                    )
+                    if alert:
+                        result = whatsapp_policy.send_immediate_template(
+                            client_id=current_client_id,
+                            phone=alert.phone,
+                            template_name=alert.name,
+                            language=alert.language,
+                            parameters=[lead_name, sender_phone, str(numeric_score)],
+                            recipient_kind="operator",
+                            sender=whatsapp.send_template,
+                            action="hot_lead_alert_send",
+                        )
+                        if result.state == "sent":
                             lead.notified_hot_at = datetime.utcnow()
                     else:
-                        logger.info(f"🔥 HOT LEAD: {lead_name} {sender_phone} (Score: {numeric_score})")
-                        lead.notified_hot_at = datetime.utcnow()
+                        logger.warning(
+                            "Hot-lead alert suppressed: tenant operator template is not configured"
+                        )
 
                 session.commit()
                 
                 # Explicit decline logic
                 if string_score == "Cold":
-                    decline_keywords = ["not interested", "stop", "no", "nahi", "cancel", "unsubscribe"]
-                    if any(word in user_text.lower() for word in decline_keywords):
+                    if whatsapp_policy.is_opt_out_text(user_text):
                         lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
                         lead.status = lost_stage
                         session.commit()

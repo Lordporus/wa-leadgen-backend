@@ -7,6 +7,7 @@ import logging
 from app.clients.airtable_client import AirtableClient
 from app.clients.whatsapp_client import WhatsAppClient
 from app.core.config import CLIENT_ID
+from app.services import whatsapp_policy
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -15,19 +16,7 @@ def main(live: bool):
     airtable = AirtableClient()
     whatsapp = WhatsAppClient()
     
-    # 1. Check approval status of dentist_outreach_v1
     template_name = "dentist_outreach_v1"
-    template_info = whatsapp.get_template(template_name)
-    if not template_info:
-        logger.warning(f"Could not fetch template status for {template_name}. It might not exist.")
-    else:
-        status = template_info.get("status")
-        logger.info(f"Template '{template_name}' status is: {status}")
-        if live and status != "APPROVED":
-            logger.error(f"Cannot send live outreach because template status is {status}")
-            return
-            
-    # 2. Get New Leads
     records = airtable._search("{Status}='New Lead'", client_id=CLIENT_ID)
     logger.info(f"Found {len(records)} New Leads.")
     
@@ -40,8 +29,15 @@ def main(live: bool):
             
         if live:
             logger.info(f"[LIVE] Sending {template_name} to {name} ({phone})")
-            res = whatsapp.send_template(phone, template_name)
-            if res:
+            result = whatsapp_policy.send_immediate_template(
+                client_id=CLIENT_ID,
+                phone=phone,
+                template_name=template_name,
+                language="en",
+                sender=whatsapp.send_template,
+                action="local_initial_outreach_send",
+            )
+            if result.state == "sent":
                 airtable.update_lead_status(
                     phone,
                     "Contacted",
@@ -52,6 +48,10 @@ def main(live: bool):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Send initial outreach to New Leads.")
-    parser.add_argument("--live", action="store_true", help="Actually send messages and update Airtable.")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use the production policy evaluator before any provider send.",
+    )
     args = parser.parse_args()
     main(args.live)
