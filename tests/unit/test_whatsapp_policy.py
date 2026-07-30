@@ -2,6 +2,7 @@ import importlib
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from requests.exceptions import Timeout
@@ -417,14 +418,21 @@ def test_manual_human_send_allowed_during_takeover(policy_db):
         session.get(Lead, 1).is_human_takeover = True
         session.commit()
 
-    calls = []
+    calls: list[tuple[str, str]] = []
+
+    def send_human_message(
+        phone: str,
+        body: str,
+        **_kwargs: object,
+    ) -> str:
+        calls.append((phone, body))
+        return "wamid.human"
+
     result = whatsapp_policy.send_immediate_text(
         client_id=1,
         phone="15550000001",
         text="human reply",
-        sender=lambda phone, body, **_kwargs: (
-            calls.append((phone, body)) or "wamid.human"
-        ),
+        sender=send_human_message,
         action="human_manual_send",
         allow_human_takeover=True,
     )
@@ -522,7 +530,15 @@ def test_template_send_refreshes_meta_and_operator_recipient(policy_db):
         waba_id="waba-1",
         phone_number_id="phone-1",
     )
-    calls = []
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def send_alert_template(
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        calls.append((args, kwargs))
+        return "wamid.alert"
+
     result = whatsapp_policy.send_immediate_template(
         client_id=1,
         phone="15550000999",
@@ -531,9 +547,7 @@ def test_template_send_refreshes_meta_and_operator_recipient(policy_db):
         parameters=["Lead", "1555", "90"],
         recipient_kind="operator",
         verifier=lambda **_: verification,
-        sender=lambda *args, **kwargs: (
-            calls.append((args, kwargs)) or "wamid.alert"
-        ),
+        sender=send_alert_template,
         action="hot_lead_alert_send",
     )
     assert result.state == "sent"
@@ -718,10 +732,17 @@ def test_stale_template_verification_failure_blocks_without_local_fallback(
             )
         )
         session.commit()
-    provider_calls = []
+    provider_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def failed_verification(**_kwargs):
         raise MetaTransportError("offline verification failed")
+
+    def record_unsafe_send(
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        provider_calls.append((args, kwargs))
+        return "wamid.unsafe"
 
     result = whatsapp_policy.send_immediate_template(
         client_id=1,
@@ -730,9 +751,7 @@ def test_stale_template_verification_failure_blocks_without_local_fallback(
         language="en",
         parameters=[],
         verifier=failed_verification,
-        sender=lambda *args, **kwargs: (
-            provider_calls.append((args, kwargs)) or "wamid.unsafe"
-        ),
+        sender=record_unsafe_send,
         action="stale_template_test_send",
     )
 

@@ -5,6 +5,7 @@ import importlib.util
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,7 +16,7 @@ from app.services import jobs
 from scripts import send_initial_outreach
 
 
-def _sent_result(message_id="wamid.policy"):
+def _sent_result(message_id: str = "wamid.policy") -> SimpleNamespace:
     return SimpleNamespace(
         state="sent",
         reason_code="allowed",
@@ -82,7 +83,12 @@ def test_only_low_level_client_can_call_meta_send_methods():
 
 
 def test_follow_up_scheduler_executes_template_policy(monkeypatch):
-    policy_calls = []
+    policy_calls: list[dict[str, Any]] = []
+
+    def record_policy_call(**kwargs: Any) -> SimpleNamespace:
+        policy_calls.append(kwargs)
+        return _sent_result()
+
     timestamp = (
         datetime.now() - timedelta(hours=49)
     ).strftime("%Y-%m-%d %H:%M:%S")
@@ -101,7 +107,7 @@ def test_follow_up_scheduler_executes_template_policy(monkeypatch):
     monkeypatch.setattr(
         application.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: policy_calls.append(kwargs) or _sent_result(),
+        record_policy_call,
     )
     monkeypatch.setattr(
         application.store,
@@ -117,7 +123,12 @@ def test_follow_up_scheduler_executes_template_policy(monkeypatch):
 
 
 def test_booking_alert_executes_tenant_operator_template_policy(monkeypatch):
-    policy_calls = []
+    policy_calls: list[dict[str, Any]] = []
+
+    def record_policy_call(**kwargs: Any) -> SimpleNamespace:
+        policy_calls.append(kwargs)
+        return _sent_result()
+
     monkeypatch.setattr(
         application.calendly,
         "get_recent_bookings",
@@ -158,7 +169,7 @@ def test_booking_alert_executes_tenant_operator_template_policy(monkeypatch):
     monkeypatch.setattr(
         application.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: policy_calls.append(kwargs) or _sent_result(),
+        record_policy_call,
     )
 
     application.calendly_sync_job()
@@ -170,8 +181,12 @@ def test_booking_alert_executes_tenant_operator_template_policy(monkeypatch):
 
 
 def test_live_outreach_script_executes_template_policy(monkeypatch):
-    policy_calls = []
+    policy_calls: list[dict[str, Any]] = []
     status_updates = []
+
+    def record_policy_call(**kwargs: Any) -> SimpleNamespace:
+        policy_calls.append(kwargs)
+        return _sent_result()
 
     class FakeAirtable:
         def _search(self, *_args, **_kwargs):
@@ -200,7 +215,7 @@ def test_live_outreach_script_executes_template_policy(monkeypatch):
     monkeypatch.setattr(
         send_initial_outreach.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: policy_calls.append(kwargs) or _sent_result(),
+        record_policy_call,
     )
 
     send_initial_outreach.main(live=True)
@@ -222,7 +237,12 @@ def test_worker_immediate_paths_execute_policy(
     refusal,
     expected_action,
 ):
-    policy_calls = []
+    policy_calls: list[dict[str, Any]] = []
+
+    def record_policy_call(**kwargs: Any) -> SimpleNamespace:
+        policy_calls.append(kwargs)
+        return _sent_result()
+
     context = SimpleNamespace(
         client=SimpleNamespace(id=7),
         gemini=SimpleNamespace(
@@ -271,7 +291,7 @@ def test_worker_immediate_paths_execute_policy(
     monkeypatch.setattr(
         jobs.whatsapp_policy,
         "send_immediate_text",
-        lambda **kwargs: policy_calls.append(kwargs) or _sent_result(),
+        record_policy_call,
     )
 
     jobs.process_webhook_message(
@@ -290,7 +310,16 @@ def test_worker_immediate_paths_execute_policy(
 
 
 def test_worker_outbox_path_executes_final_policy_dispatch(monkeypatch):
-    dispatch_calls = []
+    dispatch_calls: list[dict[str, Any]] = []
+
+    def record_dispatch_call(**kwargs: Any) -> SimpleNamespace:
+        dispatch_calls.append(kwargs)
+        return SimpleNamespace(
+            state="sent",
+            newly_sent=True,
+            provider_message_id="wamid.outbox",
+        )
+
     context = SimpleNamespace(
         client=SimpleNamespace(id=7),
         gemini=SimpleNamespace(
@@ -354,14 +383,7 @@ def test_worker_outbox_path_executes_final_policy_dispatch(monkeypatch):
     monkeypatch.setattr(
         jobs.whatsapp_outbox,
         "dispatch_intent",
-        lambda **kwargs: (
-            dispatch_calls.append(kwargs)
-            or SimpleNamespace(
-                state="sent",
-                newly_sent=True,
-                provider_message_id="wamid.outbox",
-            )
-        ),
+        record_dispatch_call,
     )
 
     jobs.process_webhook_message(
@@ -381,8 +403,17 @@ def test_worker_outbox_path_executes_final_policy_dispatch(monkeypatch):
 
 
 def test_current_and_legacy_hot_lead_alerts_execute_policy(monkeypatch):
-    modern_calls = []
-    legacy_calls = []
+    modern_calls: list[dict[str, Any]] = []
+    legacy_calls: list[dict[str, Any]] = []
+
+    def record_modern_call(**kwargs: Any) -> SimpleNamespace:
+        modern_calls.append(kwargs)
+        return _sent_result()
+
+    def record_legacy_call(**kwargs: Any) -> SimpleNamespace:
+        legacy_calls.append(kwargs)
+        return _sent_result()
+
     alert = jobs.whatsapp_policy.OperatorTemplate(
         phone="15550000999",
         name="hot_alert",
@@ -428,7 +459,7 @@ def test_current_and_legacy_hot_lead_alerts_execute_policy(monkeypatch):
     monkeypatch.setattr(
         jobs.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: modern_calls.append(kwargs) or _sent_result(),
+        record_modern_call,
     )
     jobs._run_analytics(
         MagicMock(),
@@ -473,7 +504,7 @@ def test_current_and_legacy_hot_lead_alerts_execute_policy(monkeypatch):
     monkeypatch.setattr(
         legacy_whatsapp.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: legacy_calls.append(kwargs) or _sent_result(),
+        record_legacy_call,
     )
     legacy_whatsapp._process_analytics_and_extraction_bg(
         "15550000001",

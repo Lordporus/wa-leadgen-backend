@@ -409,7 +409,12 @@ def test_clear_decline_is_persisted_before_ai_generation(monkeypatch):
         won_stages=["Booked"],
         lost_stages=["Lost"],
     )
-    order = []
+    order: list[str] = []
+
+    def record_opt_out(**_kwargs: Any) -> bool:
+        order.append("opt_out")
+        return True
+
     monkeypatch.setattr(jobs, "get_store", lambda: store)
     monkeypatch.setattr(
         jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: context
@@ -417,7 +422,7 @@ def test_clear_decline_is_persisted_before_ai_generation(monkeypatch):
     monkeypatch.setattr(
         jobs.whatsapp_outbox,
         "record_inbound_opt_out",
-        lambda **_kwargs: order.append("opt_out") or True,
+        record_opt_out,
     )
     monkeypatch.setattr(
         jobs.whatsapp_policy,

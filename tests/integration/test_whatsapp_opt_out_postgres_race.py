@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -156,7 +157,13 @@ def _seed(factory):
         session.commit()
 
 
-def _record_opt_out(errors, completed=None):
+ProviderCall = tuple[tuple[Any, ...], dict[str, Any]]
+
+
+def _record_opt_out(
+    errors: list[Exception],
+    completed: Event | None = None,
+) -> None:
     try:
         whatsapp_policy.record_opt_out(
             client_id=1,
@@ -170,15 +177,21 @@ def _record_opt_out(errors, completed=None):
         errors.append(exc)
 
 
-def _dispatch(provider_calls, results, errors):
+def _dispatch(
+    provider_calls: list[ProviderCall],
+    results: list[whatsapp_outbox.DispatchResult],
+    errors: list[Exception],
+) -> None:
+    def send_provider(*args: Any, **kwargs: Any) -> str:
+        provider_calls.append((args, kwargs))
+        return "wamid.out"
+
     try:
         results.append(
             whatsapp_outbox.dispatch_intent(
                 intent_id=1,
                 client_id=1,
-                sender=lambda *args, **kwargs: (
-                    provider_calls.append((args, kwargs)) or "wamid.out"
-                ),
+                sender=send_provider,
             )
         )
     except Exception as exc:  # pragma: no cover - asserted below
@@ -188,21 +201,21 @@ def _dispatch(provider_calls, results, errors):
 def test_opt_out_commit_before_queued_send_claim_blocks_provider(
     postgres_policy_db,
 ):
-    errors = []
+    errors: list[Exception] = []
     opt_out_committed = Event()
-    provider_calls = []
-    dispatch_results = []
+    provider_calls: list[ProviderCall] = []
+    dispatch_results: list[whatsapp_outbox.DispatchResult] = []
 
     opt_out_thread = Thread(
         target=_record_opt_out,
         args=(errors, opt_out_committed),
     )
-    dispatch_thread = Thread(
-        target=lambda: (
-            opt_out_committed.wait(5)
-            and _dispatch(provider_calls, dispatch_results, errors)
-        )
-    )
+
+    def dispatch_after_opt_out() -> None:
+        if opt_out_committed.wait(5):
+            _dispatch(provider_calls, dispatch_results, errors)
+
+    dispatch_thread = Thread(target=dispatch_after_opt_out)
     opt_out_thread.start()
     dispatch_thread.start()
     opt_out_thread.join(10)
@@ -221,9 +234,9 @@ def test_queued_send_waits_while_opt_out_transaction_is_committing(
     factory = postgres_policy_db
     opt_out_flushed = Event()
     release_opt_out = Event()
-    errors = []
-    provider_calls = []
-    dispatch_results = []
+    errors: list[Exception] = []
+    provider_calls: list[ProviderCall] = []
+    dispatch_results: list[whatsapp_outbox.DispatchResult] = []
 
     def pause_opt_out_after_flush(session, _context):
         if any(isinstance(row, WhatsAppOptOut) for row in session.new):
