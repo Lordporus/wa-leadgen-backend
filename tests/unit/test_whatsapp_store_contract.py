@@ -190,13 +190,18 @@ def test_dual_store_forwards_tenant_context_to_every_write():
 
 def test_dual_inbound_persists_postgres_before_airtable():
     store, primary, secondary = _dual_store()
-    order = []
-    secondary.persist_inbound_message_required.side_effect = (
-        lambda *_args, **_kwargs: order.append("postgres") or True
-    )
-    primary.append_message.side_effect = (
-        lambda *_args, **_kwargs: order.append("airtable") or True
-    )
+    order: list[str] = []
+
+    def persist_postgres(*_args, **_kwargs) -> bool:
+        order.append("postgres")
+        return True
+
+    def persist_airtable(*_args, **_kwargs) -> bool:
+        order.append("airtable")
+        return True
+
+    secondary.persist_inbound_message_required.side_effect = persist_postgres
+    primary.append_message.side_effect = persist_airtable
 
     assert store.append_message(
         "919999999999",
@@ -231,13 +236,18 @@ def test_dual_inbound_postgres_failure_prevents_airtable_completion():
 
 def test_dual_outbound_ordering_remains_primary_then_secondary():
     store, primary, secondary = _dual_store()
-    order = []
-    primary.append_message.side_effect = (
-        lambda *_args, **_kwargs: order.append("primary") or True
-    )
-    secondary.append_message.side_effect = (
-        lambda *_args, **_kwargs: order.append("secondary") or True
-    )
+    order: list[str] = []
+
+    def persist_primary(*_args, **_kwargs) -> bool:
+        order.append("primary")
+        return True
+
+    def persist_secondary(*_args, **_kwargs) -> bool:
+        order.append("secondary")
+        return True
+
+    primary.append_message.side_effect = persist_primary
+    secondary.append_message.side_effect = persist_secondary
 
     assert store.append_message(
         "919999999999",

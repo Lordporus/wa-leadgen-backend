@@ -154,12 +154,16 @@ def test_transitions_template_reference_and_terminal_no_reenroll(sequence_db):
 
 def test_due_tick_exactly_once_and_dry_run_never_sends(sequence_db, monkeypatch):
     _, enrollment_id = _active_sequence(sequence_db)
-    sent = []
+    sent: list[dict[str, object]] = []
+
+    def send_template(**kwargs) -> ImmediateSendResult:
+        sent.append(kwargs)
+        return ImmediateSendResult("sent", "allowed", "wamid-1")
+
     monkeypatch.setattr(
         whatsapp_sequences.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: sent.append(kwargs)
-        or ImmediateSendResult("sent", "allowed", "wamid-1"),
+        send_template,
     )
     assert whatsapp_sequences.dry_run(1, enrollment_id)["dry_run"] and not sent
     assert whatsapp_sequences.process_due_enrollments()["sent"] == 1
@@ -172,12 +176,16 @@ def test_due_tick_exactly_once_and_dry_run_never_sends(sequence_db, monkeypatch)
 
 def test_duplicate_worker_claim_does_not_send_twice(sequence_db, monkeypatch):
     _, enrollment_id = _active_sequence(sequence_db)
-    sent = []
+    sent: list[dict[str, object]] = []
+
+    def send_template(**kwargs) -> ImmediateSendResult:
+        sent.append(kwargs)
+        return ImmediateSendResult("sent", "allowed", "wamid-2")
+
     monkeypatch.setattr(
         whatsapp_sequences.whatsapp_policy,
         "send_immediate_template",
-        lambda **kwargs: sent.append(kwargs)
-        or ImmediateSendResult("sent", "allowed", "wamid-2"),
+        send_template,
     )
     now = datetime.now(timezone.utc)
     first = whatsapp_sequences._claim_due_enrollment(now)
@@ -189,7 +197,7 @@ def test_duplicate_worker_claim_does_not_send_twice(sequence_db, monkeypatch):
 
 def test_reply_committed_at_final_guard_blocks_provider(sequence_db, monkeypatch):
     _, enrollment_id = _active_sequence(sequence_db)
-    provider_calls = []
+    provider_calls: list[int] = []
 
     def final_boundary(**kwargs):
         with sequence_db() as session:
@@ -249,7 +257,7 @@ def _serialized_lock_helper(monkeypatch, controlled_thread, acquired, proceed):
 
 def test_reply_commit_wins_shared_lock_and_blocks_provider(sequence_db, monkeypatch):
     sequence_id, enrollment_id = _active_sequence(sequence_db)
-    provider_calls = []
+    provider_calls: list[int] = []
     reply_acquired = threading.Event()
     allow_reply_commit = threading.Event()
     _configure_inbound_store(sequence_db, monkeypatch)
@@ -261,7 +269,7 @@ def test_reply_commit_wins_shared_lock_and_blocks_provider(sequence_db, monkeypa
     )
     store = db_client.DatabaseClient()
     store.ok = True
-    outcomes = []
+    outcomes: list[str | bool | None] = []
     with sequence_db() as session:
         enrollment = session.get(WhatsAppSequenceEnrollment, enrollment_id)
         lead = session.get(Lead, enrollment.lead_id)
@@ -288,8 +296,8 @@ def test_reply_commit_wins_shared_lock_and_blocks_provider(sequence_db, monkeypa
             session.commit()
             outcomes.append(reason)
 
-    reply = threading.Thread(
-        target=lambda: outcomes.append(
+    def persist_reply() -> None:
+        outcomes.append(
             store.append_message(
                 "15550000001",
                 "inbound",
@@ -297,9 +305,9 @@ def test_reply_commit_wins_shared_lock_and_blocks_provider(sequence_db, monkeypa
                 wa_message_id="wamid-reply-first",
                 client_id=1,
             )
-        ),
-        name="reply-first",
-    )
+        )
+
+    reply = threading.Thread(target=persist_reply, name="reply-first")
     reply.start()
     assert reply_acquired.wait(timeout=2)
     sequence = threading.Thread(
@@ -329,7 +337,7 @@ def test_reply_commit_wins_shared_lock_and_blocks_provider(sequence_db, monkeypa
 
 def test_sequence_send_lock_wins_before_reply_persistence(sequence_db, monkeypatch):
     sequence_id, enrollment_id = _active_sequence(sequence_db)
-    provider_calls = []
+    provider_calls: list[int] = []
     sequence_acquired = threading.Event()
     allow_sequence_send = threading.Event()
     _configure_inbound_store(sequence_db, monkeypatch)
@@ -341,7 +349,7 @@ def test_sequence_send_lock_wins_before_reply_persistence(sequence_db, monkeypat
     )
     store = db_client.DatabaseClient()
     store.ok = True
-    outcomes = []
+    outcomes: list[str | bool | None] = []
 
     def send_boundary():
         with sequence_db() as session:
@@ -368,8 +376,8 @@ def test_sequence_send_lock_wins_before_reply_persistence(sequence_db, monkeypat
     )
     sequence.start()
     assert sequence_acquired.wait(timeout=2)
-    reply = threading.Thread(
-        target=lambda: outcomes.append(
+    def persist_reply() -> None:
+        outcomes.append(
             store.append_message(
                 "15550000001",
                 "inbound",
@@ -377,9 +385,9 @@ def test_sequence_send_lock_wins_before_reply_persistence(sequence_db, monkeypat
                 wa_message_id="wamid-sequence-first",
                 client_id=1,
             )
-        ),
-        name="reply-after-sequence",
-    )
+        )
+
+    reply = threading.Thread(target=persist_reply, name="reply-after-sequence")
     reply.start()
     allow_sequence_send.set()
     sequence.join(timeout=2)
@@ -431,7 +439,7 @@ def test_required_inbound_persistence_is_idempotent(sequence_db, monkeypatch):
 
 def test_accepted_uncommitted_provider_outcome_never_retries(sequence_db, monkeypatch):
     _, enrollment_id = _active_sequence(sequence_db)
-    calls = []
+    calls: list[int] = []
 
     def uncertain(**_kwargs):
         calls.append(1)
@@ -461,7 +469,7 @@ def test_uncertain_transport_outcome_never_retries(
     error,
 ):
     _, enrollment_id = _active_sequence(sequence_db)
-    calls = []
+    calls: list[int] = []
 
     def uncertain(**_kwargs):
         calls.append(1)
@@ -518,7 +526,7 @@ def test_scheduler_lock_blocks_duplicate_tick_and_allows_stale_lock_recovery(
             "release": lambda self: None,
         },
     )()
-    enqueued = []
+    enqueued: list[dict[str, str]] = []
     queue.connection = type(
         "Connection", (), {"lock": lambda self, *_args, **_kwargs: recovered_lock}
     )()
@@ -552,7 +560,7 @@ def test_scheduler_renews_lock_during_tick_longer_than_initial_ttl(monkeypatch):
             return None
 
     lock = Lock()
-    enqueued = []
+    enqueued: list[dict[str, str]] = []
     queue = type(
         "Queue",
         (),
@@ -634,12 +642,17 @@ def test_scheduler_lost_ownership_does_not_extend_release_or_reschedule(monkeypa
 
 
 def test_scheduler_ownership_loss_stops_before_next_claim(monkeypatch):
-    claims = []
+    claims: list[int] = []
     ownership = iter([True, False])
+
+    def claim(_now) -> int:
+        claims.append(1)
+        return 10
+
     monkeypatch.setattr(
         whatsapp_sequences,
         "_claim_due_enrollment",
-        lambda _now: claims.append(1) or 10,
+        claim,
     )
     monkeypatch.setattr(
         whatsapp_sequences,
