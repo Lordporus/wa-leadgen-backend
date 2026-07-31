@@ -1,9 +1,13 @@
+import asyncio
 import inspect
 from contextlib import nullcontext
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api.routers import health
 from scripts import run_migrations
@@ -70,7 +74,7 @@ def test_migration_actor_rejects_an_unexpected_target_revision(monkeypatch):
 
 
 def test_readiness_is_secret_free_and_requires_required_configuration(monkeypatch):
-    monkeypatch.setattr(health, "health_check", lambda *_: {"status": "ok"})
+    monkeypatch.setattr(health, "_health_payload", lambda: {"status": "ok"})
     monkeypatch.setattr(health, "DATABASE_URL", "postgresql://configured")
     monkeypatch.setattr(health, "WHATSAPP_ACCESS_TOKEN", "not-returned")
     monkeypatch.setattr(health, "WHATSAPP_PHONE_NUMBER_ID", "not-returned")
@@ -91,7 +95,7 @@ def test_readiness_is_secret_free_and_requires_required_configuration(monkeypatc
 
 
 def test_readiness_fails_when_worker_consumption_is_disabled(monkeypatch):
-    monkeypatch.setattr(health, "health_check", lambda *_: {"status": "ok"})
+    monkeypatch.setattr(health, "_health_payload", lambda: {"status": "ok"})
     monkeypatch.setattr(health, "DATABASE_URL", "configured")
     monkeypatch.setattr(health, "WHATSAPP_ACCESS_TOKEN", "configured")
     monkeypatch.setattr(health, "WHATSAPP_PHONE_NUMBER_ID", "configured")
@@ -110,7 +114,7 @@ def test_readiness_fails_when_worker_consumption_is_disabled(monkeypatch):
 
 
 def test_readiness_fails_for_a_schema_revision_mismatch(monkeypatch):
-    monkeypatch.setattr(health, "health_check", lambda *_: {"status": "ok"})
+    monkeypatch.setattr(health, "_health_payload", lambda: {"status": "ok"})
     monkeypatch.setattr(health, "DATABASE_URL", "configured")
     monkeypatch.setattr(health, "WHATSAPP_ACCESS_TOKEN", "configured")
     monkeypatch.setattr(health, "WHATSAPP_PHONE_NUMBER_ID", "configured")
@@ -126,3 +130,40 @@ def test_readiness_fails_for_a_schema_revision_mismatch(monkeypatch):
         inspect.unwrap(health.readiness_check)(None, None)
 
     assert exc_info.value.status_code == 503
+
+
+def test_readiness_route_handles_slowapi_response_injection(monkeypatch):
+    monkeypatch.setattr(
+        health,
+        "_health_payload",
+        lambda: {
+            "status": "ok",
+            "db": True,
+            "redis": True,
+            "whatsapp_queue": {"ready": True, "depth": 0, "workers": 1},
+        },
+    )
+    monkeypatch.setattr(health, "DATABASE_URL", "configured")
+    monkeypatch.setattr(health, "WHATSAPP_ACCESS_TOKEN", "configured")
+    monkeypatch.setattr(health, "WHATSAPP_PHONE_NUMBER_ID", "configured")
+    monkeypatch.setattr(health, "WHATSAPP_APP_SECRET", "configured")
+    monkeypatch.setattr(health, "WHATSAPP_RQ_CONSUMER_ENABLED", True)
+    monkeypatch.setattr(
+        health,
+        "_schema_readiness",
+        lambda: {"ready": True, "required_revision": "0021", "current_revision": "0021"},
+    )
+    app = FastAPI()
+    app.state.limiter = health.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(health.router)
+
+    async def request_readiness():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/ready")
+
+    response = asyncio.run(request_readiness())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"

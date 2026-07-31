@@ -62,6 +62,11 @@ def read_root(request: Request, response: Response):
 @limiter.limit("60/minute")
 def health_check(request: Request, response: Response):
     """Infrastructure health check — no auth required."""
+    return _health_payload()
+
+
+def _health_payload() -> dict[str, object]:
+    """Collect shared infrastructure health without invoking a decorated route."""
     db_ok = False
     redis_ok = False
 
@@ -109,7 +114,7 @@ def health_check(request: Request, response: Response):
 @limiter.limit("60/minute")
 def readiness_check(request: Request, response: Response):
     """Fail closed for rollout traffic without exposing configuration values."""
-    health = health_check(request, response)
+    health = _health_payload()
     schema = _schema_readiness()
     configuration = {
         "database_url_set": bool(DATABASE_URL),
