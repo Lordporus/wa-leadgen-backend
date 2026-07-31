@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.clients.whatsapp_client import MetaTransportError
 from app.core import database
-from app.core.models import Client, Lead, Message, WhatsAppOutboundIntent, WhatsAppWebhookEvent
+from app.core.models import Client, Lead, Message, WhatsAppOperatorAction, WhatsAppOutboundIntent, WhatsAppWebhookEvent
 from app.services import whatsapp_policy
 
 
@@ -27,6 +27,30 @@ class DispatchResult:
 
 
 _STATUS_ORDER = {"pending": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _mark_blocked_locked(
+    session: Any,
+    intent: WhatsAppOutboundIntent,
+    *,
+    category: str,
+    reason: str,
+) -> None:
+    """Keep intent, timeline, and operator audit in one terminal state."""
+    intent.state = "blocked"
+    intent.failure_category = category
+    intent.failure_reason = reason
+    message = session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none()
+    if message is not None:
+        message.status = "blocked"
+    if intent.operator_action_id is not None:
+        action_row = session.query(WhatsAppOperatorAction).filter_by(
+            id=intent.operator_action_id,
+            client_id=intent.client_id,
+        ).one_or_none()
+        if action_row is not None:
+            action_row.outcome = "blocked"
+            action_row.completed_at = datetime.utcnow()
 
 
 def create_or_get_intent(
@@ -47,9 +71,13 @@ def create_or_get_intent(
         ).one_or_none()
         if existing is not None:
             return existing.id
+        lead = session.query(Lead).filter_by(client_id=client_id, phone=recipient_phone).with_for_update().one_or_none()
+        if lead is None:
+            raise OutboundIntentError("Outbound recipient is not a tenant lead")
         intent = WhatsAppOutboundIntent(
             client_id=client_id, inbound_event_id=event.id, reply_version=reply_version,
             recipient_phone=recipient_phone, correlation_id=correlation_id, state="pending",
+            intent_kind="ai_reply", takeover_version=lead.takeover_version,
         )
         session.add(intent)
         try:
@@ -119,6 +147,8 @@ def dispatch_intent(
     client_id: int,
     sender: Callable[..., str | None],
     final_guard: Callable[[Any, Client, Lead | None], str | None] | None = None,
+    action: str = "queued_reply_send",
+    allow_human_takeover: bool = False,
 ) -> DispatchResult:
     """Claim, policy-check, send, and persist once without unsafe retries."""
     if database.SessionLocal is None:
@@ -163,21 +193,43 @@ def dispatch_intent(
             ).with_for_update().one_or_none()
             if lead is None:
                 raise OutboundIntentError("Outbound recipient is not a tenant lead")
+            if intent.takeover_version is None or intent.takeover_version != lead.takeover_version:
+                _mark_blocked_locked(
+                    session, intent, category="stale_takeover_version",
+                    reason="Conversation ownership changed after intent creation",
+                )
+                from app.services import ai_decision
+                ai_decision.mark_audit_outcome_locked(
+                    session, audit_id=intent.ai_decision_audit_id,
+                    client_id=client_id, outcome="blocked",
+                    reason="stale_takeover_version",
+                )
+                session.commit()
+                return DispatchResult("blocked")
+            if intent.intent_kind == "manual" and not lead.is_human_takeover:
+                _mark_blocked_locked(
+                    session, intent, category="manual_takeover_released",
+                    reason="Manual send requires active takeover",
+                )
+                session.commit()
+                return DispatchResult("blocked")
             credentials = whatsapp_policy.tenant_meta_credentials(client)
             decision = whatsapp_policy.evaluate_locked(
                 session,
                 client=client,
                 lead=lead,
-                action="queued_reply_send",
+                action=action,
                 message_type="text",
                 outbound_intent_id=intent.id,
                 correlation_id=intent.correlation_id,
                 credentials=credentials,
+                allow_human_takeover=allow_human_takeover,
             )
             if not decision.allowed:
-                intent.state = "blocked"
-                intent.failure_category = "policy_blocked"
-                intent.failure_reason = decision.reason_code
+                _mark_blocked_locked(
+                    session, intent, category="policy_blocked",
+                    reason=decision.reason_code,
+                )
                 whatsapp_policy.set_provider_audit_outcome(
                     session,
                     decision,
@@ -191,9 +243,10 @@ def dispatch_intent(
             if final_guard is not None:
                 guard_reason = final_guard(session, client, lead)
                 if guard_reason:
-                    intent.state = "blocked"
-                    intent.failure_category = "final_ai_guard"
-                    intent.failure_reason = guard_reason
+                    _mark_blocked_locked(
+                        session, intent, category="final_ai_guard",
+                        reason=guard_reason,
+                    )
                     whatsapp_policy.set_provider_audit_outcome(session, decision, outcome="blocked", failure_category=guard_reason)
                     from app.services import ai_decision
                     ai_decision.mark_audit_outcome_locked(session, audit_id=intent.ai_decision_audit_id, client_id=client_id, outcome="blocked", reason=guard_reason)
@@ -223,12 +276,24 @@ def dispatch_intent(
             )
             from app.services import ai_decision
             ai_decision.mark_audit_outcome_locked(session, audit_id=intent.ai_decision_audit_id, client_id=client_id, outcome="sent")
-            if session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none() is None:
+            message = session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none()
+            if message is None:
                 session.add(Message(
                     lead_id=lead.id, direction="OUTBOUND", msg_type="text", body=intent.body,
                     wa_message_id=provider_message_id, channel="whatsapp", status="sent",
                     outbound_intent_id=intent.id,
                 ))
+            else:
+                message.status = "sent"
+                message.wa_message_id = provider_message_id
+                message.provider_message_id = provider_message_id
+            if intent.operator_action_id is not None:
+                action_row = session.query(WhatsAppOperatorAction).filter_by(
+                    id=intent.operator_action_id, client_id=client_id
+                ).one_or_none()
+                if action_row is not None:
+                    action_row.outcome = "sent"
+                    action_row.completed_at = datetime.utcnow()
             session.commit()
     except Exception as exc:
         if decision is not None and decision.allowed:
@@ -264,6 +329,16 @@ def _record_send_failure(intent_id: int, client_id: int, error: Exception, *, un
         intent.state = "unknown" if uncertain else "failed"
         intent.failure_category = "uncertain_send_outcome" if uncertain else type(error).__name__
         intent.failure_reason = str(error)[:2000]
+        message = session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none()
+        if message is not None:
+            message.status = intent.state
+        if intent.operator_action_id is not None:
+            action = session.query(WhatsAppOperatorAction).filter_by(
+                id=intent.operator_action_id, client_id=client_id
+            ).one_or_none()
+            if action is not None:
+                action.outcome = intent.state
+                action.completed_at = datetime.utcnow()
         session.commit()
 
 
@@ -313,6 +388,7 @@ def process_outbound_intent(*, intent_id: int, client_id: int) -> DispatchResult
         if not intent.body:
             raise OutboundIntentError("Outbound intent has no persisted reply text")
         recipient, body, audit_id = intent.recipient_phone, intent.body, intent.ai_decision_audit_id
+        intent_kind = intent.intent_kind
     def guard(session, client, lead):
         return ai_decision.durable_reply_guard(
             session,
@@ -322,9 +398,17 @@ def process_outbound_intent(*, intent_id: int, client_id: int) -> DispatchResult
             intent_id=intent_id,
             body=body,
         )
-    result = dispatch_intent(intent_id=intent_id, client_id=client_id, sender=whatsapp.send_message, final_guard=guard)
+    is_manual = intent_kind == "manual"
+    result = dispatch_intent(
+        intent_id=intent_id,
+        client_id=client_id,
+        sender=whatsapp.send_message,
+        final_guard=None if is_manual else guard,
+        action="human_manual_send" if is_manual else "queued_reply_send",
+        allow_human_takeover=is_manual,
+    )
     if result.newly_sent and result.provider_message_id:
-        store.append_message(recipient, direction="outbound", message=body, msg_type="text", wa_message_id=result.provider_message_id, client_id=client_id)
+        store.append_message(recipient, direction="outbound", message=body, msg_type="human" if is_manual else "text", wa_message_id=result.provider_message_id, client_id=client_id)
     return result
 
 

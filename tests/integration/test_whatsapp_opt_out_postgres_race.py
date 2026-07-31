@@ -152,6 +152,7 @@ def _seed(factory):
                 recipient_phone="15550000001",
                 body="queued reply",
                 state="generating",
+                takeover_version=0,
             )
         )
         session.commit()

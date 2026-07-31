@@ -829,6 +829,7 @@ def test_queued_provider_failure_audit_survives_outbox_failure(policy_db):
             recipient_phone="15550000001",
             body="queued",
             state="generating",
+            takeover_version=0,
         )
         session.add(intent)
         session.commit()
@@ -879,7 +880,7 @@ def _add_phase9_resumable_intent(factory, *, valid_audit: bool, takeover: bool =
             audit = WhatsAppAIDecisionAudit(attempt_key=f"attempt-{takeover}", client_id=1, lead_id=1, correlation_id=inbound.correlation_id, registry_id=registry.id, decision="REPLY", confidence=.9, prompt_version=registry.prompt_version, model_route=registry.model_route, model_name=registry.model_name, schema_version="v2", latency_ms=1, token_estimate=2, safety_results={"allowed": True, "template_id": template.id, "response_type": "resumed_reply", "language": "en", "approved_fact_ids": [], "deterministic_render": True}, retrieval_references=[], final_outcome="queued", response_digest=hashlib.sha256(b"Approved reply body").hexdigest(), created_at=now, updated_at=now)
             session.add(audit)
             session.flush()
-        intent = WhatsAppOutboundIntent(client_id=1, inbound_event_id=inbound.id, recipient_phone="15550000001", body="Approved reply body", state="generating", correlation_id=inbound.correlation_id, ai_decision_audit_id=audit.id if audit else None)
+        intent = WhatsAppOutboundIntent(client_id=1, inbound_event_id=inbound.id, recipient_phone="15550000001", body="Approved reply body", state="generating", correlation_id=inbound.correlation_id, ai_decision_audit_id=audit.id if audit else None, takeover_version=0)
         session.add(intent)
         session.flush()
         if audit:

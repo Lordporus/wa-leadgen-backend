@@ -22,6 +22,7 @@ from app.services import tenant
 from app.services import whatsapp_outbox
 from app.services import whatsapp_policy
 from app.services import ai_decision
+from app.services import whatsapp_inbox
 from app.services.guardrails import minimize_sensitive_text, scan_input
 
 logger = logging.getLogger(__name__)
@@ -172,15 +173,36 @@ def process_webhook_message(
     # ── 4b2. Usage hard cap check ───────────────────────────────────────
     if current_client_id:
         plan = "base"
+        durable_limit_lead = None
         session_factory = database.SessionLocal
         if session_factory is not None:
             with session_factory() as session:
                 db_client = session.get(Client, int(current_client_id))
                 if db_client and db_client.plan_tier:
                     plan = db_client.plan_tier
+                try:
+                    durable_limit_lead = session.query(Lead).filter_by(
+                        client_id=current_client_id, phone=sender_phone
+                    ).one_or_none()
+                except Exception:
+                    # Legacy/offline schemas may not yet contain the Phase 10
+                    # lead fields. The cap remains fail-closed via the primary
+                    # store takeover below.
+                    logger.warning("Durable lead unavailable for usage-limit takeover")
         allowed, reason = check_limit(current_client_id, "ai_response", plan=plan)
         if not allowed:
             logger.warning(f"AI cap hit for client {current_client_id}, lead {sender_phone}: {reason}")
+            if durable_limit_lead is not None:
+                whatsapp_inbox.transition_takeover(
+                    client_id=current_client_id,
+                    lead_id=durable_limit_lead.id,
+                    enabled=True,
+                    expected_version=None,
+                    operator_id="system:usage-limit",
+                    reason=reason or "ai_usage_limit",
+                    correlation_id=correlation_id or str(msg_id),
+                    confirmed=True,
+                )
             store.update_human_takeover_by_id(
                 lead["id"],
                 True,
@@ -225,6 +247,16 @@ def process_webhook_message(
         else:
             ai_decision.record_outcome(client_id=current_client_id, lead_id=durable_lead.id, result=result, outcome="escalated" if result.value.decision == "ESCALATE" else result.value.decision.lower())
         if result.value.decision == "ESCALATE":
+            whatsapp_inbox.transition_takeover(
+                client_id=current_client_id,
+                lead_id=durable_lead.id,
+                enabled=True,
+                expected_version=None,
+                operator_id="system:ai-escalation",
+                reason=result.value.escalation_reason or "ai_escalation",
+                correlation_id=correlation_id or str(msg_id),
+                confirmed=True,
+            )
             store.update_human_takeover_by_id(lead["id"], True, client_id=current_client_id)
         return
     if intent_id is None:

@@ -1053,7 +1053,7 @@ def _authoritative_takeover_active(
         return True
     if not record:
         return True
-    return bool(record.get("fields", {}).get("is_human_takeover"))
+    return bool(lead.is_human_takeover) or bool(record.get("fields", {}).get("is_human_takeover"))
 
 
 def _template_is_eligible(

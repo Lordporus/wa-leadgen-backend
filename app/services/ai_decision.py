@@ -542,6 +542,16 @@ def queue_reply(*, intent_id: int, client_id: int, lead_id: int, result: Decisio
         audit.outbound_intent_id = intent_id
         audit.final_outcome = "queued"
         audit.updated_at = _utcnow()
+        if session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none() is None:
+            session.add(Message(
+                lead_id=lead_id,
+                direction="OUTBOUND",
+                msg_type="text",
+                body=result.rendered_text,
+                status="pending",
+                channel="whatsapp",
+                outbound_intent_id=intent.id,
+            ))
         session.commit()
 
 
