@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.api.routers import health
 from scripts import run_migrations
@@ -102,7 +103,7 @@ def test_readiness_fails_when_worker_consumption_is_disabled(monkeypatch):
         lambda: {"ready": True, "required_revision": "0021", "current_revision": "0021"},
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(HTTPException) as exc_info:
         inspect.unwrap(health.readiness_check)(None, None)
 
     assert exc_info.value.status_code == 503
@@ -121,7 +122,7 @@ def test_readiness_fails_for_a_schema_revision_mismatch(monkeypatch):
         lambda: {"ready": False, "required_revision": "0021", "current_revision": "0020"},
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(HTTPException) as exc_info:
         inspect.unwrap(health.readiness_check)(None, None)
 
     assert exc_info.value.status_code == 503
