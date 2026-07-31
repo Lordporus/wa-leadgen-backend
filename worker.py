@@ -31,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 QUEUE_NAME = WHATSAPP_RQ_QUEUE
+SEQUENCE_TICK_JOB_ID = "whatsapp-sequence-tick"
 
 
 def validate_worker_configuration() -> None:
@@ -41,6 +42,21 @@ def validate_worker_configuration() -> None:
         )
 
 
+def ensure_sequence_tick(queue: Queue) -> None:
+    """Seed the singleton Phase 8 scheduler only when no tick is pending."""
+    existing = queue.fetch_job(SEQUENCE_TICK_JOB_ID)
+    if existing is not None and existing.get_status() in {
+        "queued",
+        "started",
+        "scheduled",
+        "deferred",
+    }:
+        return
+    from app.services.whatsapp_sequences import run_sequence_tick_job
+
+    queue.enqueue(run_sequence_tick_job, job_id=SEQUENCE_TICK_JOB_ID)
+
+
 def main():
     validate_worker_configuration()
     logger.info(f"Connecting to Redis at {REDIS_URL}")
@@ -49,12 +65,20 @@ def main():
     logger.info("Redis connection OK")
 
     queue = Queue(QUEUE_NAME, connection=conn)
+    try:
+        ensure_sequence_tick(queue)
+    except Exception as exc:
+        logger.info(
+            "Sequence tick already queued or unavailable: %s", type(exc).__name__
+        )
     # RQ's worker installs SIGTERM handling: it stops accepting new jobs,
     # completes the active job, and leaves queued work durable in Redis.
     worker = Worker([queue], connection=conn, default_worker_ttl=420)
 
     if not WHATSAPP_RQ_CONSUMER_ENABLED:
-        logger.warning("WhatsApp RQ consumer disabled; accepted webhook jobs remain durable in Redis")
+        logger.warning(
+            "WhatsApp RQ consumer disabled; accepted webhook jobs remain durable in Redis"
+        )
         stopping = False
 
         def _stop_consumer(_signal, _frame):

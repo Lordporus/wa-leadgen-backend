@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 PHONE_KEY = "Phone number type"
 
 
+def lock_tenant_lead(session, *, client_id: int, phone: str):
+    """Lock the tenant then lead row for inbound persistence/outbound policy."""
+    client = (
+        session.query(Client)
+        .filter_by(id=client_id)
+        .with_for_update()
+        .one_or_none()
+    )
+    lead = (
+        session.query(Lead)
+        .filter_by(client_id=client_id, phone=phone)
+        .with_for_update()
+        .one_or_none()
+    )
+    return client, lead
+
+
 class _TableShim:
     """
     Lets `scraper.py` keep calling `store.table.create(fields)` with a raw
@@ -384,11 +401,11 @@ class DatabaseClient:
         from sqlalchemy.exc import IntegrityError
         try:
             with self._session() as s:
-                q = select(Lead).where(
-                    Lead.phone == phone,
-                    Lead.client_id == client_id,
+                _, row = lock_tenant_lead(
+                    s,
+                    client_id=client_id,
+                    phone=phone,
                 )
-                row = s.execute(q).scalar_one_or_none()
                 if not row:
                     return True
                 s.add(Message(
@@ -406,6 +423,61 @@ class DatabaseClient:
         except SQLAlchemyError as e:
             logger.error(f"Postgres append_message error: {e}")
             return True
+
+    def persist_inbound_message_required(
+        self,
+        phone: str,
+        message: str,
+        msg_type: str = "text",
+        wa_message_id: str | None = None,
+        *,
+        client_id: int,
+    ) -> bool:
+        """Persist inbound state under the policy lock or raise for RQ retry."""
+        if not self.ok:
+            raise RuntimeError("Postgres inbound persistence is unavailable")
+        if client_id is None:
+            return False
+
+        try:
+            with self._session() as session:
+                _, lead = lock_tenant_lead(
+                    session,
+                    client_id=client_id,
+                    phone=phone,
+                )
+                if lead is None:
+                    raise RuntimeError(
+                        "Tenant lead is unavailable for required inbound persistence"
+                    )
+                if wa_message_id and (
+                    session.query(Message.id)
+                    .filter_by(
+                        lead_id=lead.id,
+                        direction="INBOUND",
+                        channel="whatsapp",
+                        wa_message_id=wa_message_id,
+                    )
+                    .first()
+                    is not None
+                ):
+                    return True
+                session.add(
+                    Message(
+                        lead_id=lead.id,
+                        direction="INBOUND",
+                        msg_type=msg_type,
+                        body=message,
+                        wa_message_id=wa_message_id,
+                        channel="whatsapp",
+                    )
+                )
+                lead.updated_at = datetime.utcnow()
+                session.commit()
+                return True
+        except SQLAlchemyError:
+            logger.exception("Required Postgres inbound persistence failed")
+            raise
 
     def update_lead_info(
         self,

@@ -533,6 +533,84 @@ class WhatsAppPolicyDecision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WhatsAppSequence(Base):
+    """Tenant-owned, WhatsApp-only approved-template follow-up sequence."""
+
+    __tablename__ = "whatsapp_sequences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft", server_default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    steps: Mapped[list["WhatsAppSequenceStep"]] = relationship(
+        back_populates="sequence", cascade="all, delete-orphan", order_by="WhatsAppSequenceStep.position"
+    )
+
+
+class WhatsAppSequenceStep(Base):
+    """One approved-template step; delay is relative to the prior send."""
+
+    __tablename__ = "whatsapp_sequence_steps"
+    __table_args__ = (
+        UniqueConstraint("sequence_id", "position", name="uq_whatsapp_sequence_step_position"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sequence_id: Mapped[int] = mapped_column(ForeignKey("whatsapp_sequences.id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    delay_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    template_id: Mapped[int] = mapped_column(ForeignKey("whatsapp_templates.id", ondelete="RESTRICT"), nullable=False)
+    parameters: Mapped[list | dict] = mapped_column(JSONB, nullable=False, default=list)
+
+    sequence: Mapped["WhatsAppSequence"] = relationship(back_populates="steps")
+
+
+class WhatsAppSequenceEnrollment(Base):
+    """A single lead's non-reenrollable execution state for a sequence."""
+
+    __tablename__ = "whatsapp_sequence_enrollments"
+    __table_args__ = (
+        UniqueConstraint("sequence_id", "lead_id", name="uq_whatsapp_sequence_enrollment"),
+        Index("idx_whatsapp_sequence_enrollment_due", "status", "next_run_at"),
+        Index("idx_whatsapp_sequence_enrollment_client", "client_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sequence_id: Mapped[int] = mapped_column(ForeignKey("whatsapp_sequences.id", ondelete="CASCADE"), nullable=False)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    current_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    stop_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WhatsAppSequenceExecution(Base):
+    """Durable one-send claim for an enrollment step; never retried after send claim."""
+
+    __tablename__ = "whatsapp_sequence_executions"
+    __table_args__ = (
+        UniqueConstraint("enrollment_id", "step_position", "attempt_number", name="uq_whatsapp_sequence_execution_attempt"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enrollment_id: Mapped[int] = mapped_column(ForeignKey("whatsapp_sequence_enrollments.id", ondelete="CASCADE"), nullable=False)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    step_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="sending", server_default="sending")
+    provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class PipelineStage(Base):
     """
     Phase 8 — per-client ordered pipeline stage.

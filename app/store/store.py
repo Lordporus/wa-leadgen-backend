@@ -312,6 +312,24 @@ class DualWriteStore:
     ) -> bool:
         if client_id is None:
             return False
+        if direction.strip().lower() == "inbound":
+            persisted = self._secondary.persist_inbound_message_required(
+                phone,
+                message,
+                msg_type,
+                wa_message_id,
+                client_id=client_id,
+            )
+            if not persisted:
+                return False
+            return self._primary.append_message(
+                phone,
+                direction,
+                message,
+                msg_type,
+                wa_message_id,
+                client_id=client_id,
+            )
         result = self._primary.append_message(
             phone,
             direction,
