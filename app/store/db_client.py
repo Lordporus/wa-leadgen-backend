@@ -408,6 +408,20 @@ class DatabaseClient:
                 )
                 if not row:
                     return True
+                if wa_message_id and (
+                    s.query(Message.id)
+                    .filter_by(
+                        lead_id=row.id,
+                        direction=direction.upper(),
+                        channel="whatsapp",
+                        wa_message_id=wa_message_id,
+                    )
+                    .first()
+                    is not None
+                ):
+                    # The durable outbox may already have materialized this
+                    # outbound row before the dual-store Airtable mirror.
+                    return True
                 s.add(Message(
                     lead_id=row.id,
                     direction=direction.upper(),

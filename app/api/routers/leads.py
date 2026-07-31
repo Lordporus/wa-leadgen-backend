@@ -1,23 +1,56 @@
 import re
 from datetime import datetime, timedelta
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.api.dependencies import get_client_key, limiter, require_api_key
-from app.api.runtime import logger, store, whatsapp
+from app.api.runtime import logger, store
 from app.core.config import LEGACY_LEAD_ID_COMPAT_ENABLED
 from app.core.database import SessionLocal
 from app.core.models import Client, EmailSuppression, Lead
 from app.email.email_validation import validate_lead_email
-from app.services import whatsapp_policy
+from app.services import whatsapp_inbox, whatsapp_outbox
 from app.store.db_client import DatabaseClient
 
 router = APIRouter()
 
 class StageUpdateBody(BaseModel):
     stage: str
+
+
+def _operation_context(request: Request, response: Response, client_id: int) -> tuple[str, str]:
+    raw = request.headers.get("x-request-id", "")
+    try:
+        correlation_id = str(UUID(raw))
+    except (ValueError, TypeError):
+        correlation_id = str(uuid4())
+    response.headers["X-Correlation-ID"] = correlation_id
+    # The current auth model identifies an authenticated tenant session, not
+    # an individual user. Never trust a browser-supplied operator identity.
+    operator_id = f"tenant:{client_id}:authenticated-session"
+    return correlation_id, operator_id
+
+
+def _inbox_error(
+    code: str,
+    correlation_id: str,
+    *,
+    status: int = 409,
+    retryable: bool = False,
+    intent_id: int | None = None,
+    state: str | None = None,
+) -> HTTPException:
+    detail = {
+        "code": code, "correlation_id": correlation_id, "retryable": retryable,
+    }
+    if intent_id is not None:
+        detail["intent_id"] = intent_id
+    if state is not None:
+        detail["state"] = state
+    return HTTPException(status_code=status, detail=detail)
 
 
 def _is_postgres_store() -> bool:
@@ -93,11 +126,6 @@ def _postgres_lead_id_for_record(
         client_id=client_id,
     )
     return pg_lead.id if pg_lead else None
-
-
-def _append_store_message(*, phone: str, client_id: int, **kwargs) -> bool:
-    """Append through the common tenant-scoped store contract."""
-    return store.append_message(phone=phone, client_id=client_id, **kwargs)
 
 
 def _parse_created_at(raw: str) -> datetime | None:
@@ -322,6 +350,8 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
     created_dt = _parse_created_at(raw_created)
     created_str = created_dt.strftime("%b %d, %Y") if created_dt else "—"
 
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    pg_lead = _load_postgres_lead(lead_id=pg_lead_id, client_id=client.id) if pg_lead_id else None
     return {
         "id":              str(record["id"]),
         "name":            fields.get("Name", "Unknown"),
@@ -333,6 +363,11 @@ def get_lead_detail(request: Request, response: Response, lead_id: str, client: 
         "score_breakdown": _derive_score_breakdown(score),
         "created_at":      created_str,
         "messages":        _parse_messages(last_msg),
+        "is_human_takeover": bool(pg_lead.is_human_takeover) if pg_lead else bool(fields.get("is_human_takeover", False)),
+        "takeover_version": int(pg_lead.takeover_version or 0) if pg_lead else 0,
+        "takeover_owner": pg_lead.takeover_owner if pg_lead else None,
+        "takeover_reason": pg_lead.takeover_reason if pg_lead else None,
+        "durable_lead_id": pg_lead.id if pg_lead else None,
     }
 
 @router.get("/api/leads/{lead_id}/messages")
@@ -356,50 +391,8 @@ def get_lead_messages(request: Request, response: Response, lead_id: str, client
         if not SessionLocal:
             return fallback
 
-        from app.core.models import Lead, Message
-        with SessionLocal() as s:
-            # Verify lead exists AND belongs to this tenant (client_id scoping).
-            # This is the only authz check needed — we don't go through store here.
-            lead = s.query(Lead).filter(
-                Lead.id == parsed_id,
-                Lead.client_id == client.id,
-            ).first()
-
-            if not lead:
-                return fallback
-
-            msgs = (
-                s.query(Message)
-                .filter(Message.lead_id == lead.id)
-                .order_by(Message.created_at.asc())
-                .all()
-            )
-            result = []
-            for m in msgs:
-                # Role: inbound = user; human takeover = human; else outbound AI/system
-                if m.direction == "INBOUND":
-                    role = "user"
-                elif (m.msg_type or "").lower() == "human":
-                    role = "human"
-                else:
-                    role = "ai"
-                channel = (m.channel or "whatsapp").lower()
-                result.append(
-                    {
-                        "id": f"m{m.id}",
-                        "role": role,
-                        "content": m.body or "",
-                        "timestamp": m.created_at.strftime("%I:%M %p").lstrip("0")
-                        if m.created_at
-                        else "",
-                        "status": m.status,
-                        # Multi-channel (Phase E1 / frontend F7)
-                        "channel": channel,
-                        "subject": m.subject,
-                        "msg_type": m.msg_type,
-                    }
-                )
-            return result or fallback
+        result = whatsapp_inbox.timeline(client_id=client.id, lead_id=parsed_id)
+        return result or fallback
     except HTTPException:
         raise
     except Exception as e:
@@ -447,37 +440,77 @@ def update_lead_stage(
 
     return {"success": True, "stage": body.stage}
 
+class TakeoverBody(BaseModel):
+    expected_version: int = Field(ge=0)
+    reason: str = Field(default="operator_takeover", min_length=1, max_length=255)
+
+
+class ReleaseBody(BaseModel):
+    expected_version: int = Field(ge=0)
+    confirmed: bool
+    reevaluate_on_next_inbound: bool = False
+
+
 @router.post("/api/leads/{lead_id}/takeover", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
-def takeover_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+def takeover_lead(request: Request, response: Response, lead_id: str, body: TakeoverBody, client: Client = Depends(require_api_key)):
     """Human overrides the AI chatbot for this lead."""
     record = _store_record_for_lead_id(lead_id, client.id)
     if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    updated = store.update_human_takeover_by_id(
-        record["id"],
-        True,
-        client_id=client.id,
-    )
-    if not updated:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": True}
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=503, detail="Durable lead unavailable")
+    correlation_id, operator_id = _operation_context(request, response, client.id)
+    try:
+        state = whatsapp_inbox.transition_takeover(
+            client_id=client.id, lead_id=pg_lead_id, enabled=True,
+            expected_version=body.expected_version, operator_id=operator_id,
+            reason=body.reason, correlation_id=correlation_id, confirmed=True,
+        )
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+    mirror_status = "not_required"
+    if not _is_postgres_store():
+        try:
+            mirror_status = "mirrored" if store.update_human_takeover_by_id(record["id"], True, client_id=client.id) else "failed"
+        except Exception:
+            mirror_status = "failed"
+    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": True, "takeover_version": state.version, "owner": state.owner, "reason": state.reason, "correlation_id": correlation_id, "mirror_status": mirror_status}
 
 @router.post("/api/leads/{lead_id}/release", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
-def release_lead(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+def release_lead(request: Request, response: Response, lead_id: str, body: ReleaseBody, client: Client = Depends(require_api_key)):
     """Human gives control back to the AI chatbot."""
     record = _store_record_for_lead_id(lead_id, client.id)
     if not record:
         raise HTTPException(status_code=404, detail="Lead not found")
-    updated = store.update_human_takeover_by_id(
-        record["id"],
-        False,
-        client_id=client.id,
-    )
-    if not updated:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": False}
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=503, detail="Durable lead unavailable")
+    correlation_id, operator_id = _operation_context(request, response, client.id)
+    try:
+        state = whatsapp_inbox.transition_takeover(
+            client_id=client.id, lead_id=pg_lead_id, enabled=False,
+            expected_version=body.expected_version, operator_id=operator_id,
+            reason="operator_release", correlation_id=correlation_id,
+            confirmed=body.confirmed,
+        )
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+    mirror_status = "not_required"
+    if not _is_postgres_store():
+        try:
+            mirror_status = "mirrored" if store.update_human_takeover_by_id(record["id"], False, client_id=client.id) else "failed"
+        except Exception:
+            mirror_status = "failed"
+    if mirror_status == "failed":
+        raise _inbox_error("takeover_mirror_failed", correlation_id, status=503, retryable=True)
+    return {"success": True, "lead_id": str(record["id"]), "is_human_takeover": False, "takeover_version": state.version, "reevaluation": "next_inbound" if body.reevaluate_on_next_inbound else "not_requested", "correlation_id": correlation_id}
 
 
 # ── Lead email management (Phase E4) ──────────────────────────────────────
@@ -656,7 +689,8 @@ def update_lead_email(
 
 
 class SendMessageBody(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=4096)
+    idempotency_key: str = Field(min_length=16, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$")
 
 @router.post("/api/leads/{lead_id}/send-message", dependencies=[Depends(require_api_key)])
 @limiter.limit("60/minute", key_func=get_client_key)
@@ -673,36 +707,92 @@ def send_human_message(request: Request, response: Response, lead_id: str, body:
         logger.error(f"Lead {lead_id} has no phone number on file.")
         raise HTTPException(status_code=400, detail="Lead has no phone number on file")
 
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, lead, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=503, detail="Durable lead unavailable")
+    correlation_id, operator_id = _operation_context(request, response, client.id)
+    message = body.message.strip()
+    if not message:
+        raise _inbox_error("empty_manual_message", correlation_id, status=422)
+    intent_id: int | None = None
     try:
-        result = whatsapp_policy.send_immediate_text(
-            client_id=client.id,
-            phone=phone,
-            text=body.message,
-            sender=whatsapp.send_message,
-            action="human_manual_send",
-            allow_human_takeover=True,
+        intent_id, created = whatsapp_inbox.create_manual_intent(
+            client_id=client.id, lead_id=pg_lead_id, body=message,
+            idempotency_key=body.idempotency_key, operator_id=operator_id,
+            correlation_id=correlation_id,
         )
-        if result.state != "sent" or not result.provider_message_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f"WhatsApp policy blocked this message: {result.reason_code}",
-            )
-        provider_message_id = result.provider_message_id
-    except HTTPException:
-        raise
-    except Exception:
-        logger.error("Failed to send manual message", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to send WhatsApp message")
+        result = whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=client.id)
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+    except Exception as exc:
+        logger.error("Durable manual send failed", exc_info=True)
+        state = whatsapp_inbox.outbound_intent_state(
+            client_id=client.id, intent_id=intent_id
+        ) if intent_id is not None else None
+        raise _inbox_error(
+            "manual_send_failed", correlation_id, status=502,
+            retryable=state == "failed", intent_id=intent_id, state=state,
+        ) from exc
+    if result.state not in {"sent", "unknown"}:
+        raise _inbox_error(
+            "manual_send_" + result.state, correlation_id, retryable=False,
+            intent_id=intent_id, state=result.state,
+        )
+    return {"success": result.state == "sent", "intent_id": intent_id, "state": result.state, "provider_message_id": result.provider_message_id, "idempotent_replay": not created, "correlation_id": correlation_id}
 
-    _append_store_message(
-        phone=phone,
-        client_id=client.id,
-        direction="OUTBOUND",
-        message=body.message,
-        msg_type="human",
-        wa_message_id=provider_message_id,
-    )
-    return {"success": True}
+
+@router.get("/api/inbox/takeover-queue", dependencies=[Depends(require_api_key)])
+def takeover_queue(request: Request, response: Response, client: Client = Depends(require_api_key)):
+    correlation_id, _operator_id = _operation_context(request, response, client.id)
+    try:
+        items = whatsapp_inbox.list_tasks(client_id=client.id)
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+    return {"items": items, "correlation_id": correlation_id}
+
+
+@router.get("/api/leads/{lead_id}/operator-actions", dependencies=[Depends(require_api_key)])
+def operator_action_history(request: Request, response: Response, lead_id: str, client: Client = Depends(require_api_key)):
+    record = _store_record_for_lead_id(lead_id, client.id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    pg_lead_id = _postgres_lead_id_for_record(lead_id, record, client.id)
+    if pg_lead_id is None:
+        raise HTTPException(status_code=503, detail="Durable lead unavailable")
+    correlation_id, _operator_id = _operation_context(request, response, client.id)
+    try:
+        items = whatsapp_inbox.list_operator_actions(
+            client_id=client.id, lead_id=pg_lead_id
+        )
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id, status=404) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+    return {"items": items, "correlation_id": correlation_id}
+
+
+@router.post("/api/inbox/takeover-queue/{task_id}/acknowledge", dependencies=[Depends(require_api_key)])
+def acknowledge_takeover_task(request: Request, response: Response, task_id: int, client: Client = Depends(require_api_key)):
+    correlation_id, operator_id = _operation_context(request, response, client.id)
+    try:
+        return whatsapp_inbox.update_task(client_id=client.id, task_id=task_id, operator_id=operator_id, resolve=False, correlation_id=correlation_id)
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id, status=404) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
+
+
+@router.post("/api/inbox/takeover-queue/{task_id}/resolve", dependencies=[Depends(require_api_key)])
+def resolve_takeover_task(request: Request, response: Response, task_id: int, client: Client = Depends(require_api_key)):
+    correlation_id, operator_id = _operation_context(request, response, client.id)
+    try:
+        return whatsapp_inbox.update_task(client_id=client.id, task_id=task_id, operator_id=operator_id, resolve=True, correlation_id=correlation_id)
+    except whatsapp_inbox.InboxConflict as exc:
+        raise _inbox_error(str(exc), correlation_id, status=404) from exc
+    except whatsapp_inbox.InboxUnavailable as exc:
+        raise _inbox_error(str(exc), correlation_id, status=503, retryable=True) from exc
 
 
 

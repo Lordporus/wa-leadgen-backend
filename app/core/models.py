@@ -157,6 +157,11 @@ class Lead(Base):
     lead_score_numeric: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notified_hot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_human_takeover: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    takeover_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    takeover_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    takeover_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    takeover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     whatsapp_opted_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ── Email contact (Phase E1) ──────────────────────────────────────────
     # email_status: unknown | valid | bounced | complained | unsubscribed
@@ -361,6 +366,11 @@ class WhatsAppOutboundIntent(Base):
     ai_decision_audit_id: Mapped[int | None] = mapped_column(
         ForeignKey("whatsapp_ai_decision_audits.id", ondelete="RESTRICT"), nullable=True
     )
+    intent_kind: Mapped[str] = mapped_column(String(30), nullable=False, default="ai_reply", server_default="ai_reply")
+    takeover_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    operator_action_id: Mapped[int | None] = mapped_column(
+        ForeignKey("whatsapp_operator_actions.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -467,6 +477,48 @@ class WhatsAppAIDecisionAudit(Base):
     final_outcome: Mapped[str] = mapped_column(String(50), nullable=False)
     escalation_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
     response_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WhatsAppOperatorAction(Base):
+    """Tenant-scoped audit of inbox ownership and manual-send operations."""
+    __tablename__ = "whatsapp_operator_actions"
+    __table_args__ = (
+        UniqueConstraint("client_id", "idempotency_key", name="uq_whatsapp_operator_action_idempotency"),
+        Index("idx_whatsapp_operator_action_lead_time", "client_id", "lead_id", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="RESTRICT"), nullable=False)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="RESTRICT"), nullable=False)
+    operator_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    from_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    to_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
+    outbound_intent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhatsAppTakeoverTask(Base):
+    """Durable operator work item for takeover/escalation handling."""
+    __tablename__ = "whatsapp_takeover_tasks"
+    __table_args__ = (
+        Index("idx_whatsapp_takeover_queue", "client_id", "status", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+    takeover_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="open")
+    owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

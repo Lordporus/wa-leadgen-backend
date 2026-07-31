@@ -14,13 +14,13 @@ from app.api.routers import leads
 from app.store.store import DualWriteStore
 
 
-def _request(path: str = "/api/leads") -> Request:
+def _request(path: str = "/api/leads", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
     return Request(
         {
             "type": "http",
             "method": "GET",
             "path": path,
-            "headers": [],
+            "headers": headers or [],
             "query_string": b"",
             "client": ("offline-test", 1),
             "server": ("offline-test", 80),
@@ -31,15 +31,6 @@ def _request(path: str = "/api/leads") -> Request:
 
 def _route(function):
     return inspect.unwrap(function)
-
-
-def _allow_policy_send(**kwargs):
-    provider_id = kwargs["sender"](kwargs["phone"], kwargs["text"])
-    return leads.whatsapp_policy.ImmediateSendResult(
-        state="sent",
-        reason_code="allowed",
-        provider_message_id=provider_id,
-    )
 
 
 def _record(record_id: str, *, phone: str = "919999999999", status: str = "New Lead"):
@@ -201,9 +192,6 @@ def test_airtable_only_messages_takeover_and_release_use_list_id(monkeypatch):
         lambda lead_id, record, client_id: None,
     )
     monkeypatch.setattr(leads, "SessionLocal", None)
-    send = MagicMock(return_value="wamid.airtable-offline")
-    monkeypatch.setattr(leads.whatsapp, "send_message", send)
-    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
 
     public_id = _route(leads.list_leads)(_request(), Response(), client, None)[0]["id"]
     messages = _route(leads.get_lead_messages)(
@@ -221,42 +209,12 @@ def test_airtable_only_messages_takeover_and_release_use_list_id(monkeypatch):
         }
     ]
 
-    takeover = _route(leads.takeover_lead)(
-        _request(f"/api/leads/{public_id}/takeover"),
-        Response(),
-        public_id,
-        client,
-    )
-    assert takeover == {
-        "success": True,
-        "lead_id": public_id,
-        "is_human_takeover": True,
-    }
-    assert fake_store.record["fields"]["is_human_takeover"] is True
-
-    release = _route(leads.release_lead)(
-        _request(f"/api/leads/{public_id}/release"),
-        Response(),
-        public_id,
-        client,
-    )
-    assert release == {
-        "success": True,
-        "lead_id": public_id,
-        "is_human_takeover": False,
-    }
-    assert fake_store.record["fields"]["is_human_takeover"] is False
-
-    sent = _route(leads.send_human_message)(
-        _request(f"/api/leads/{public_id}/send-message"),
-        Response(),
-        public_id,
-        leads.SendMessageBody(message="Offline human reply"),
-        client,
-    )
-    assert sent == {"success": True}
-    send.assert_called_once_with("919999999999", "Offline human reply")
-    assert fake_store.messages[-1]["client_id"] == 1
+    with pytest.raises(HTTPException) as error:
+        _route(leads.takeover_lead)(
+            _request(f"/api/leads/{public_id}/takeover"), Response(), public_id,
+            leads.TakeoverBody(expected_version=0), client,
+        )
+    assert error.value.status_code == 503
 
 
 def test_postgres_detail_returns_scoped_lead_as_string_id(monkeypatch):
@@ -308,6 +266,33 @@ def test_postgres_detail_blocks_cross_tenant_access(monkeypatch):
     assert fake_store.calls == [(8, 1)]
 
 
+def test_browser_operator_header_is_ignored(monkeypatch):
+    fake_store = FakePostgresStore()
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(leads, "store", fake_store)
+    monkeypatch.setattr(leads, "_is_postgres_store", lambda: True)
+    monkeypatch.setattr(
+        leads.whatsapp_inbox,
+        "transition_takeover",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            version=1, owner=kwargs["operator_id"], reason=kwargs["reason"]
+        ),
+    )
+
+    _route(leads.takeover_lead)(
+        _request(
+            "/api/leads/7/takeover",
+            headers=[(b"x-operator-id", b"spoofed-admin")],
+        ),
+        Response(),
+        "7",
+        leads.TakeoverBody(expected_version=0),
+        SimpleNamespace(id=1),
+    )
+
+    assert captured["operator_id"] == "tenant:1:authenticated-session"
+
+
 def test_postgres_takeover_blocks_cross_tenant_access(monkeypatch):
     fake_store = FakePostgresStore()
     monkeypatch.setattr(leads, "store", fake_store)
@@ -318,6 +303,7 @@ def test_postgres_takeover_blocks_cross_tenant_access(monkeypatch):
             _request("/api/leads/8/takeover"),
             Response(),
             "8",
+            leads.TakeoverBody(expected_version=0),
             SimpleNamespace(id=1),
         )
 
@@ -328,7 +314,7 @@ def test_postgres_takeover_blocks_cross_tenant_access(monkeypatch):
 def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
     fake_store = FakeDualStore()
     client = SimpleNamespace(id=1)
-    db_lead = SimpleNamespace(id=42, is_human_takeover=False)
+    db_lead = SimpleNamespace(id=42, is_human_takeover=False, takeover_version=0, takeover_owner=None, takeover_reason=None)
     db_message = SimpleNamespace(
         id=5,
         direction="OUTBOUND",
@@ -361,9 +347,10 @@ def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
         lambda lead_id, record, client_id: 42,
     )
     monkeypatch.setattr(leads, "SessionLocal", lambda: nullcontext(session))
-    send = MagicMock(return_value="wamid.offline")
-    monkeypatch.setattr(leads.whatsapp, "send_message", send)
-    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
+    monkeypatch.setattr(leads.whatsapp_inbox, "timeline", lambda **_: [{"role": "human"}])
+    monkeypatch.setattr(leads.whatsapp_inbox, "transition_takeover", lambda **kw: SimpleNamespace(version=kw["expected_version"] + 1, owner="operator", reason=kw["reason"]))
+    monkeypatch.setattr(leads.whatsapp_inbox, "create_manual_intent", lambda **_: (91, True))
+    monkeypatch.setattr(leads.whatsapp_outbox, "process_outbound_intent", lambda **_: SimpleNamespace(state="sent", provider_message_id="wamid.offline"))
 
     public_id = "recOfflineLead"
     messages = _route(leads.get_lead_messages)(
@@ -378,6 +365,7 @@ def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
         _request(f"/api/leads/{public_id}/takeover"),
         Response(),
         public_id,
+        leads.TakeoverBody(expected_version=0),
         client,
     )
     assert takeover["lead_id"] == public_id
@@ -387,6 +375,7 @@ def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
         _request(f"/api/leads/{public_id}/release"),
         Response(),
         public_id,
+        leads.ReleaseBody(expected_version=1, confirmed=True),
         client,
     )
     assert release["lead_id"] == public_id
@@ -396,18 +385,16 @@ def test_dual_mode_related_routes_accept_returned_airtable_id(monkeypatch):
         _request(f"/api/leads/{public_id}/send-message"),
         Response(),
         public_id,
-        leads.SendMessageBody(message="Manual reply"),
+        leads.SendMessageBody(message="Manual reply", idempotency_key="manual-offline-0001"),
         client,
     )
-    assert sent == {"success": True}
-    send.assert_called_once_with("919999999999", "Manual reply")
-    assert fake_store.messages[0]["msg_type"] == "human"
+    assert sent["success"] is True and sent["intent_id"] == 91
 
 
 def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
     fake_store = FakePostgresStore()
     client = SimpleNamespace(id=1)
-    db_lead = SimpleNamespace(id=7, is_human_takeover=False)
+    db_lead = SimpleNamespace(id=7, is_human_takeover=False, takeover_version=0, takeover_owner=None, takeover_reason=None)
     db_message = SimpleNamespace(
         id=9,
         direction="INBOUND",
@@ -434,9 +421,10 @@ def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
     monkeypatch.setattr(leads, "store", fake_store)
     monkeypatch.setattr(leads, "_is_postgres_store", lambda: True)
     monkeypatch.setattr(leads, "SessionLocal", lambda: nullcontext(session))
-    send = MagicMock(return_value="wamid.offline")
-    monkeypatch.setattr(leads.whatsapp, "send_message", send)
-    monkeypatch.setattr(leads.whatsapp_policy, "send_immediate_text", _allow_policy_send)
+    monkeypatch.setattr(leads.whatsapp_inbox, "timeline", lambda **_: [{"role": "user"}])
+    monkeypatch.setattr(leads.whatsapp_inbox, "transition_takeover", lambda **kw: SimpleNamespace(version=kw["expected_version"] + 1, owner="operator", reason=kw["reason"]))
+    monkeypatch.setattr(leads.whatsapp_inbox, "create_manual_intent", lambda **_: (92, True))
+    monkeypatch.setattr(leads.whatsapp_outbox, "process_outbound_intent", lambda **_: SimpleNamespace(state="sent", provider_message_id="wamid.offline"))
 
     listed = _route(leads.list_leads)(_request(), Response(), client, None)
     public_id = listed[0]["id"]
@@ -472,38 +460,30 @@ def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
         _request(f"/api/leads/{public_id}/takeover"),
         Response(),
         public_id,
+        leads.TakeoverBody(expected_version=0),
         client,
     )
     assert takeover["lead_id"] == public_id
-    assert fake_store.records[(7, 1)]["fields"]["is_human_takeover"] is True
+    assert takeover["is_human_takeover"] is True
 
     release = _route(leads.release_lead)(
         _request(f"/api/leads/{public_id}/release"),
         Response(),
         public_id,
+        leads.ReleaseBody(expected_version=1, confirmed=True),
         client,
     )
     assert release["lead_id"] == public_id
-    assert fake_store.records[(7, 1)]["fields"]["is_human_takeover"] is False
+    assert release["is_human_takeover"] is False
 
     sent = _route(leads.send_human_message)(
         _request(f"/api/leads/{public_id}/send-message"),
         Response(),
         public_id,
-        leads.SendMessageBody(message="Manual reply"),
+        leads.SendMessageBody(message="Manual reply", idempotency_key="manual-offline-0002"),
         client,
     )
-    assert sent == {"success": True}
-    assert fake_store.messages == [
-        {
-            "phone": "919999999999",
-            "client_id": 1,
-                "direction": "OUTBOUND",
-                "message": "Manual reply",
-                "msg_type": "human",
-                "wa_message_id": "wamid.offline",
-            }
-        ]
+    assert sent["success"] is True and sent["intent_id"] == 92
 
 
 def test_postgres_mode_rejects_airtable_id(monkeypatch):
