@@ -3,13 +3,17 @@
 Render must start the backend from the `backend/` repository root with:
 
 ```sh
-python scripts/run_migrations.py && uvicorn main:app --host 0.0.0.0 --port $PORT
+uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-This command is defined in `render.yaml`. `DATABASE_URL` must be present in the
-Render service environment.
+This command is defined in `render.yaml`. Migrations run only from the manual,
+approval-gated GitHub `release-migration.yml` workflow before an approved
+Render web rollout. The worker never runs Alembic. `DATABASE_URL` must be
+available only to the selected GitHub deployment environment.
 
-The migration wrapper opens a PostgreSQL transaction and acquires the
+The migration actor requires an approved release identifier, a verified
+backup/recovery confirmation, and the exact current Alembic revision expected
+before it connects. It then opens a PostgreSQL transaction and acquires the
 application's transaction advisory lock before invoking Alembic on that exact
 connection. Concurrent Render instances wait for the same lock. The lock and
 all migration DDL share one transaction, which also works with a transaction
@@ -18,23 +22,21 @@ or connection loss. After the first instance upgrades the schema, each waiting
 instance acquires the lock in turn, verifies that the database is already at
 head, and then starts Uvicorn.
 
-This service currently uses the free Render plan, so the migration is kept in
-the start gate rather than relying on availability of a dedicated pre-deploy
-command. Serialization is enforced by PostgreSQL, not by an assumption that
-Render starts only one instance.
+Render automatic deploy is disabled for both web and worker. Serialization is
+enforced by PostgreSQL, not by an assumption that Render starts only one
+instance.
 
 If Alembic fails, the wrapper exits non-zero and `&&` prevents Uvicorn from
 starting. Application code therefore cannot start against an outdated schema.
 
 ## Deployment requirement
 
-1. Take or confirm a current Supabase database backup.
-2. Confirm the Render service has the intended `DATABASE_URL`.
-3. Deploy without changing `MIGRATION_MODE`; production remains `dual`.
-4. In the Render deploy log, require acquisition of the migration gate and a
-   successful `alembic upgrade head` before the Uvicorn startup line.
-5. Verify `/health` only after the migration command succeeds.
-6. Keep `EMAIL_PLATFORM_ENABLED=false`.
+1. Follow `PHASE11_RELEASE_RUNBOOK.md`; its approvals, pinned commit, config
+   manifest, backup verification, expected revision, and staging evidence are
+   mandatory.
+2. Deploy without changing `MIGRATION_MODE`; production remains `dual`.
+3. Require the successful migration workflow record before the web rollout.
+4. Verify `/ready`, then `/health`, before rolling out the worker.
 
 No migration should be run manually from a developer workstation using the
 production `.env`.
@@ -59,8 +61,8 @@ SQL before manually selecting the target revision.
 - A waiting instance holds one database transaction/connection while another
   migration is running; keep the service connection budget in mind when
   scaling.
-- If a future paid deployment uses Render's dedicated pre-deploy command, run
-  this same migration wrapper in that single step and remove it from
-  `startCommand` to avoid duplicate gates.
+- If a future paid deployment moves the migration actor to Render's dedicated
+  pre-deploy command, retain the same approval/revision gates and disable the
+  GitHub migration workflow for that release to preserve one actor.
 - Migration `0012` is additive, but its downgrade deletes durable delivery
   history. Prefer application rollback without schema downgrade.

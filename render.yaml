@@ -3,8 +3,10 @@ services:
     name: whatsapp-acquisition-backend
     env: python
     plan: free
+    autoDeploy: false
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python scripts/run_migrations.py && uvicorn main:app --host 0.0.0.0 --port $PORT"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /ready
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -108,6 +110,7 @@ services:
     env: python
     plan: free
     numInstances: 1
+    autoDeploy: false
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python worker.py"
     envVars:

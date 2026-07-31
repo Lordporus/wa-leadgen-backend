@@ -7,9 +7,13 @@ from scripts import run_migrations
 def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
     events = []
     connection = MagicMock()
-    connection.execute.side_effect = lambda statement, params: events.append(
-        (str(statement), params)
-    )
+    def execute(statement, params=None):
+        events.append((str(statement), params))
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "0021"
+        return result
+
+    connection.execute.side_effect = execute
     engine = MagicMock()
     engine.begin.return_value = nullcontext(connection)
 
@@ -25,21 +29,31 @@ def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
         upgrade,
     )
 
-    run_migrations.run_migrations("postgresql://offline/never-connected")
+    run_migrations.run_migrations(
+        "postgresql://offline/never-connected",
+        expected_current_revision="0021",
+        expected_target_revision="0021",
+        backup_verified=True,
+        approval_id="OFFLINE-TEST",
+    )
 
     assert "pg_advisory_xact_lock" in events[0][0]
-    assert events[1][0] == "alembic"
-    assert events[1][1] is connection
-    assert events[1][2] == "head"
+    assert events[-1][0] == "alembic"
+    assert events[-1][1] is connection
+    assert events[-1][2] == "0021"
     engine.dispose.assert_called_once_with()
 
 
 def test_migration_failure_exits_transaction_and_disposes_engine(monkeypatch):
     events = []
     connection = MagicMock()
-    connection.execute.side_effect = lambda statement, params: events.append(
-        str(statement)
-    )
+    def execute(statement, params=None):
+        events.append(str(statement))
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "0021"
+        return result
+
+    connection.execute.side_effect = execute
     engine = MagicMock()
     engine.begin.return_value = nullcontext(connection)
 
@@ -51,7 +65,13 @@ def test_migration_failure_exits_transaction_and_disposes_engine(monkeypatch):
     monkeypatch.setattr(run_migrations.command, "upgrade", fail)
 
     try:
-        run_migrations.run_migrations("postgresql://offline/never-connected")
+        run_migrations.run_migrations(
+            "postgresql://offline/never-connected",
+            expected_current_revision="0021",
+            expected_target_revision="0021",
+            backup_verified=True,
+            approval_id="OFFLINE-TEST",
+        )
     except RuntimeError:
         pass
 
