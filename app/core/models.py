@@ -358,12 +358,117 @@ class WhatsAppOutboundIntent(Base):
     failure_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ai_decision_audit_id: Mapped[int | None] = mapped_column(
+        ForeignKey("whatsapp_ai_decision_audits.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped["Client"] = relationship()
+
+
+class WhatsAppAIPromptModel(Base):
+    """Tenant-owned, versioned WhatsApp AI prompt and model route."""
+    __tablename__ = "whatsapp_ai_prompt_models"
+    __table_args__ = (
+        UniqueConstraint("client_id", "purpose", "prompt_version", name="uq_whatsapp_ai_prompt_version"),
+        Index(
+            "uq_whatsapp_ai_one_active",
+            "client_id", "purpose", "schema_version",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active"),
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(50), nullable=False, default="whatsapp_reply")
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    prompt_body: Mapped[str] = mapped_column(Text, nullable=False)
+    model_route: Mapped[str] = mapped_column(String(120), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    allowed_languages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    tone: Mapped[str] = mapped_column(String(50), nullable=False, default="professional")
+    evaluation_status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WhatsAppAIApprovedFact(Base):
+    """Tenant-approved fact selectable by the AI, but never authored by it."""
+    __tablename__ = "whatsapp_ai_approved_facts"
+    __table_args__ = (
+        UniqueConstraint("client_id", "fact_key", name="uq_whatsapp_ai_fact_key"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    fact_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    fact_value: Mapped[str] = mapped_column(Text, nullable=False)
+    source_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WhatsAppAIResponseTemplate(Base):
+    """Approved deterministic WhatsApp reply template for one tenant/language."""
+    __tablename__ = "whatsapp_ai_response_templates"
+    __table_args__ = (
+        UniqueConstraint("client_id", "response_type", "language", name="uq_whatsapp_ai_response_template"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    response_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    language: Mapped[str] = mapped_column(String(20), nullable=False)
+    template_body: Mapped[str] = mapped_column(Text, nullable=False)
+    required_fact_keys: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WhatsAppConversationSummary(Base):
+    """Bounded redacted rolling summary; raw history remains in messages only."""
+    __tablename__ = "whatsapp_conversation_summaries"
+    __table_args__ = (UniqueConstraint("client_id", "lead_id", name="uq_whatsapp_conversation_summary"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class WhatsAppAIDecisionAudit(Base):
+    """Content-minimised Phase 9 audit record for one AI decision attempt."""
+    __tablename__ = "whatsapp_ai_decision_audits"
+    __table_args__ = (Index("idx_whatsapp_ai_audit_tenant_time", "client_id", "created_at"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    attempt_key: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="RESTRICT"), nullable=False)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="RESTRICT"), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    registry_id: Mapped[int | None] = mapped_column(ForeignKey("whatsapp_ai_prompt_models.id", ondelete="RESTRICT"), nullable=True)
+    outbound_intent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_route: Mapped[str] = mapped_column(String(120), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_estimate: Mapped[int] = mapped_column(Integer, nullable=False)
+    safety_results: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    retrieval_references: Mapped[list] = mapped_column(JSONB, nullable=False)
+    final_outcome: Mapped[str] = mapped_column(String(50), nullable=False)
+    escalation_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    response_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class WhatsAppConsentRecord(Base):

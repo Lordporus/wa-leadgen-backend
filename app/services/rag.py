@@ -6,12 +6,11 @@ so irrelevant chunks are never injected (spec §8.4).
 """
 
 import logging
-from typing import List
+from typing import Any, List
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from app.core.database import SessionLocal, is_configured
-from app.core.models import Document
 from app.services.ingestion import embed_text
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 RELEVANCE_THRESHOLD = 0.3
 
 
-def retrieve_context(client_id: int, query: str, top_k: int = 3) -> List[str]:
+def retrieve_references(client_id: int, query: str, top_k: int = 3) -> list[dict[str, Any]]:
     """
     Embed the query, run pgvector similarity search scoped to client_id,
     return up to top_k chunk texts that pass the relevance threshold.
@@ -36,7 +35,7 @@ def retrieve_context(client_id: int, query: str, top_k: int = 3) -> List[str]:
         with SessionLocal() as session:
             embedding_literal = "[" + ",".join(str(v) for v in query_embedding) + "]"
             stmt = text(
-                "SELECT content, embedding <=> :qvec AS distance "
+                "SELECT id, content, embedding <=> :qvec AS distance "
                 "FROM documents "
                 "WHERE client_id = :cid "
                 "ORDER BY distance ASC "
@@ -48,11 +47,16 @@ def retrieve_context(client_id: int, query: str, top_k: int = 3) -> List[str]:
             )
             rows = session.execute(stmt).fetchall()
 
-            chunks = []
+            chunks: list[dict[str, Any]] = []
             for row in rows:
                 if row.distance <= (1 - RELEVANCE_THRESHOLD):
-                    chunks.append(row.content)
+                    chunks.append({"reference": "document:%s" % getattr(row, "id", "unknown"), "content": row.content})
             return chunks
     except Exception as e:
         logger.error(f"RAG retrieval error: {e}")
         return []
+
+
+def retrieve_context(client_id: int, query: str, top_k: int = 3) -> List[str]:
+    """Compatibility wrapper for legacy callers; Phase 9 uses cited references."""
+    return [chunk["content"] for chunk in retrieve_references(client_id, query, top_k)]

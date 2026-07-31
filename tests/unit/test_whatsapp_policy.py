@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -20,6 +21,9 @@ from app.core.models import (
     Lead,
     Message,
     WhatsAppConsentRecord,
+    WhatsAppAIDecisionAudit,
+    WhatsAppAIPromptModel,
+    WhatsAppAIResponseTemplate,
     WhatsAppOptOut,
     WhatsAppOutboundIntent,
     WhatsAppPolicyDecision,
@@ -46,6 +50,9 @@ def policy_db(monkeypatch):
         Client.__table__,
         Lead.__table__,
         WhatsAppWebhookEvent.__table__,
+        WhatsAppAIPromptModel.__table__,
+        WhatsAppAIResponseTemplate.__table__,
+        WhatsAppAIDecisionAudit.__table__,
         WhatsAppOutboundIntent.__table__,
         Message.__table__,
         WhatsAppConsentRecord.__table__,
@@ -849,6 +856,99 @@ def test_queued_provider_failure_audit_survives_outbox_failure(policy_db):
         assert audit.provider_outcome == "failed"
         assert audit.provider_failure_category == "provider_exception"
         assert session.get(WhatsAppOutboundIntent, intent_id).state == "failed"
+
+
+def _add_phase9_resumable_intent(factory, *, valid_audit: bool, takeover: bool = False) -> tuple[int, int | None]:
+    now = datetime.now(timezone.utc)
+    _add_consent(factory)
+    _add_inbound(factory, now)
+    with factory() as session:
+        lead = session.get(Lead, 1)
+        lead.is_human_takeover = takeover
+        inbound = WhatsAppWebhookEvent(client_id=1, event_kind="message", event_id=f"phase9-{valid_audit}-{takeover}", correlation_id="00000000-0000-0000-0000-000000000009", phone_number_id="phone-1", payload={}, state="processed")
+        session.add(inbound)
+        session.flush()
+        audit = None
+        if valid_audit:
+            registry = WhatsAppAIPromptModel(client_id=1, purpose="whatsapp_reply", prompt_version="approved-v2", prompt_body="approved", model_route="ninerouter", model_name="offline-model", schema_version="v2", allowed_languages=["en"], tone="professional", evaluation_status="approved", evaluated_at=now, is_active=True, created_at=now, updated_at=now)
+            session.add(registry)
+            session.flush()
+            template = WhatsAppAIResponseTemplate(client_id=1, response_type="resumed_reply", language="en", template_body="Approved reply body", required_fact_keys=[], is_active=True, created_at=now, updated_at=now)
+            session.add(template)
+            session.flush()
+            audit = WhatsAppAIDecisionAudit(attempt_key=f"attempt-{takeover}", client_id=1, lead_id=1, correlation_id=inbound.correlation_id, registry_id=registry.id, decision="REPLY", confidence=.9, prompt_version=registry.prompt_version, model_route=registry.model_route, model_name=registry.model_name, schema_version="v2", latency_ms=1, token_estimate=2, safety_results={"allowed": True, "template_id": template.id, "response_type": "resumed_reply", "language": "en", "approved_fact_ids": [], "deterministic_render": True}, retrieval_references=[], final_outcome="queued", response_digest=hashlib.sha256(b"Approved reply body").hexdigest(), created_at=now, updated_at=now)
+            session.add(audit)
+            session.flush()
+        intent = WhatsAppOutboundIntent(client_id=1, inbound_event_id=inbound.id, recipient_phone="15550000001", body="Approved reply body", state="generating", correlation_id=inbound.correlation_id, ai_decision_audit_id=audit.id if audit else None)
+        session.add(intent)
+        session.flush()
+        if audit:
+            audit.outbound_intent_id = intent.id
+        session.commit()
+        return intent.id, audit.id if audit else None
+
+
+def test_resumed_pre_phase9_intent_is_blocked_before_provider(policy_db, monkeypatch):
+    from app.api import runtime
+
+    intent_id, _ = _add_phase9_resumable_intent(policy_db, valid_audit=False)
+    provider_calls = []
+    def unsafe_sender(*_args, **_kwargs):
+        provider_calls.append(True)
+        return "unsafe"
+
+    monkeypatch.setattr(runtime.whatsapp, "send_message", unsafe_sender)
+    result = whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=1)
+    assert result.state == "blocked"
+    assert provider_calls == []
+
+
+def test_resumed_current_ai_reply_reaches_provider_and_updates_same_audit(policy_db, monkeypatch):
+    from app.api import runtime
+
+    intent_id, audit_id = _add_phase9_resumable_intent(policy_db, valid_audit=True)
+    provider_calls = []
+    def successful_sender(*_args, **_kwargs):
+        provider_calls.append(True)
+        return "wamid.phase9"
+
+    monkeypatch.setattr(runtime.whatsapp, "send_message", successful_sender)
+    monkeypatch.setattr(runtime.store, "append_message", lambda *_args, **_kwargs: True)
+    result = whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=1)
+    assert result.state == "sent"
+    assert provider_calls == [True]
+    with policy_db() as session:
+        rows = session.query(WhatsAppAIDecisionAudit).filter_by(id=audit_id).all()
+        assert len(rows) == 1 and rows[0].final_outcome == "sent"
+
+
+def test_takeover_committed_before_resumed_ai_send_blocks_provider(policy_db, monkeypatch):
+    from app.api import runtime
+
+    intent_id, audit_id = _add_phase9_resumable_intent(policy_db, valid_audit=True, takeover=True)
+    provider_calls = []
+    def unsafe_sender(*_args, **_kwargs):
+        provider_calls.append(True)
+        return "unsafe"
+
+    monkeypatch.setattr(runtime.whatsapp, "send_message", unsafe_sender)
+    result = whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=1)
+    assert result.state == "blocked"
+    assert provider_calls == []
+    with policy_db() as session:
+        assert session.get(WhatsAppAIDecisionAudit, audit_id).final_outcome == "blocked"
+
+
+def test_ai_provider_send_failure_updates_existing_audit(policy_db, monkeypatch):
+    from app.api import runtime
+
+    intent_id, audit_id = _add_phase9_resumable_intent(policy_db, valid_audit=True)
+    monkeypatch.setattr(runtime.whatsapp, "send_message", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline provider rejected")))
+    with pytest.raises(RuntimeError, match="offline provider rejected"):
+        whatsapp_outbox.process_outbound_intent(intent_id=intent_id, client_id=1)
+    with policy_db() as session:
+        rows = session.query(WhatsAppAIDecisionAudit).filter_by(id=audit_id).all()
+        assert len(rows) == 1 and rows[0].final_outcome == "failed"
 
 
 def _raise_provider_exception(*_args, **_kwargs):

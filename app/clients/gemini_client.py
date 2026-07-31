@@ -1,6 +1,7 @@
 import google.generativeai as genai
 from openai import OpenAI
 import logging
+import json
 from datetime import datetime, timezone, timedelta
 from app.core.config import (
     GEMINI_API_KEY,
@@ -150,6 +151,53 @@ class GeminiClient:
         except Exception as e:
             logger.error(f"Both 9Router and direct Gemini failed: {e}")
             return "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
+
+    def generate_structured_decision(
+        self,
+        system_prompt: str,
+        context: str,
+        *,
+        schema_version: str,
+        provider_route: str,
+        model_name: str,
+    ) -> dict:
+        """Stateless Phase 9 call: never mutates the client-level prompt state."""
+        if schema_version != "v2":
+            raise ValueError("unsupported_schema_version")
+        contract = {
+            "decision": "REPLY|WAIT|ESCALATE|STOP|NO_ACTION",
+            "intent": "short intent",
+            "response_type": "approved response type for REPLY, otherwise null",
+            "approved_fact_ids": "approved integer fact IDs for REPLY, otherwise []",
+            "language": "approved language for REPLY, otherwise empty string",
+            "confidence": "number 0..1",
+            "escalation_reason": "required for ESCALATE, otherwise null",
+        }
+        instruction = (
+            system_prompt + "\n\nReturn JSON only matching this schema (" + schema_version + "): "
+            + json.dumps(contract)
+            + "\n\nNever author reply text. Select only listed response types and approved fact IDs."
+            + " Use only tenant knowledge; never make commitments.\n\nCONTEXT:\n" + context
+        )
+        if provider_route == "ninerouter":
+            if _router_client is None or model_name != NINEROUTER_MODEL:
+                raise ValueError("unsupported_or_unconfigured_ninerouter_model")
+            response = _router_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "system", "content": instruction}],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("empty_structured_response")
+            return json.loads(content)
+        if provider_route == "gemini":
+            if model_name != "gemini-2.5-flash" or not GEMINI_API_KEY:
+                raise ValueError("unsupported_or_unconfigured_gemini_model")
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(instruction)
+            return json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+        raise ValueError("unsupported_provider_route")
 
     def extract_lead_info(self, text: str):
         prompt = f"""
