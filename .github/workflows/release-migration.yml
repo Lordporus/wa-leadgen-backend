@@ -1,0 +1,62 @@
+name: Approved migration release
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub deployment environment with approval and DATABASE_URL secret
+        required: true
+        type: choice
+        options: [staging, production]
+      expected_current_revision:
+        description: Exact Alembic revision expected before this release
+        required: true
+        type: string
+      expected_target_revision:
+        description: Exact reviewed Alembic head to apply in this release
+        required: true
+        type: string
+      backup_verified:
+        description: Verified backup/recovery evidence exists for this environment
+        required: true
+        type: boolean
+      approval_id:
+        description: Recorded migration approval identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: approved-migration-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_ENV: ci
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Apply one approved migration release
+        env:
+          EXPECTED_CURRENT_REVISION: ${{ inputs.expected_current_revision }}
+          EXPECTED_TARGET_REVISION: ${{ inputs.expected_target_revision }}
+          BACKUP_VERIFIED: ${{ inputs.backup_verified }}
+          APPROVAL_ID: ${{ inputs.approval_id }}
+        run: |
+          test "$BACKUP_VERIFIED" = "true"
+          python scripts/run_migrations.py \
+            --expected-current-revision "$EXPECTED_CURRENT_REVISION" \
+            --expected-target-revision "$EXPECTED_TARGET_REVISION" \
+            --backup-verified \
+            --approval-id "$APPROVAL_ID"
