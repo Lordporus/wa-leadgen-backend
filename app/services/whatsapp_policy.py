@@ -33,40 +33,47 @@ from app.core.models import (
     WhatsAppTemplate,
     WhatsAppTenantPolicy,
 )
+from app.store import db_client
 
 DEFAULT_POLICY_VERSION = "phase7-v1"
 DEFAULT_EXCLUDED_STAGES = ("Booked", "Lost")
 TEMPLATE_VERIFICATION_TTL = timedelta(minutes=15)
 
-_OPT_OUT_PHRASES = frozenset({
-    "stop",
-    "unsubscribe",
-    "opt out",
-    "optout",
-    "remove me",
-    "do not contact",
-    "dont contact",
-    "no more messages",
-    "not interested",
-    "band karo",
-    "message band karo",
-    "message mat karo",
-    "mujhe message mat karo",
-    "nahi chahiye",
-    "ruko",
-    "parar",
-    "baja",
-    "no me escribas",
-    "arret",
-    "arretez",
-    "desabonner",
-    "pare",
-    "cancelar inscricao",
-})
+_OPT_OUT_PHRASES = frozenset(
+    {
+        "stop",
+        "unsubscribe",
+        "opt out",
+        "optout",
+        "remove me",
+        "do not contact",
+        "dont contact",
+        "no more messages",
+        "not interested",
+        "band karo",
+        "message band karo",
+        "message mat karo",
+        "mujhe message mat karo",
+        "nahi chahiye",
+        "ruko",
+        "parar",
+        "baja",
+        "no me escribas",
+        "arret",
+        "arretez",
+        "desabonner",
+        "pare",
+        "cancelar inscricao",
+    }
+)
 
 
 class WhatsAppPolicyError(RuntimeError):
     """WhatsApp policy state cannot be evaluated safely."""
+
+
+class ProviderOutcomeUncertain(WhatsAppPolicyError):
+    """Meta may have accepted a send before its durable transaction failed."""
 
 
 @dataclass(frozen=True)
@@ -147,12 +154,15 @@ def is_opt_out_text(text: str) -> bool:
         normalized,
     ):
         return True
-    return re.fullmatch(
-        r"(?:no(?:\s+thanks?)?\s+)?"
-        r"(?:(?:i\s+(?:am|m)\s+))?"
-        r"not\s+interested(?:\s+(?:thanks?|please))?",
-        normalized,
-    ) is not None
+    return (
+        re.fullmatch(
+            r"(?:no(?:\s+thanks?)?\s+)?"
+            r"(?:(?:i\s+(?:am|m)\s+))?"
+            r"not\s+interested(?:\s+(?:thanks?|please))?",
+            normalized,
+        )
+        is not None
+    )
 
 
 def record_consent(
@@ -171,12 +181,20 @@ def record_consent(
     when = _as_utc_aware(consented_at or utc_now())
     with database.SessionLocal() as session:
         client = session.query(Client).filter_by(id=client_id).with_for_update().one()
-        lead = session.query(Lead).filter_by(client_id=client_id, phone=normalized).with_for_update().one_or_none()
+        lead = (
+            session.query(Lead)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         if lead is None and not _is_tenant_operator(client, normalized):
             raise WhatsAppPolicyError("Consent phone is not a tenant recipient")
-        record = session.query(WhatsAppConsentRecord).filter_by(
-            client_id=client_id, phone=normalized
-        ).with_for_update().one_or_none()
+        record = (
+            session.query(WhatsAppConsentRecord)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         if record is None:
             record = WhatsAppConsentRecord(
                 client_id=client_id,
@@ -195,18 +213,20 @@ def record_consent(
             record.revoked_at = None
             record.revocation_reason = None
         session.flush()
-        session.add(WhatsAppPolicyDecision(
-            audit_key=str(uuid4()),
-            client_id=client_id,
-            phone=normalized,
-            action="consent_recorded",
-            decision="applied",
-            reason_code="consent_recorded",
-            policy_version=policy_version,
-            session_open=lead is not None and _session_open(session, lead.id, when),
-            provider_outcome="not_applicable",
-            created_at=when,
-        ))
+        session.add(
+            WhatsAppPolicyDecision(
+                audit_key=str(uuid4()),
+                client_id=client_id,
+                phone=normalized,
+                action="consent_recorded",
+                decision="applied",
+                reason_code="consent_recorded",
+                policy_version=policy_version,
+                session_open=lead is not None and _session_open(session, lead.id, when),
+                provider_outcome="not_applicable",
+                created_at=when,
+            )
+        )
         session.commit()
         return record.id
 
@@ -228,14 +248,20 @@ def record_opt_out(
     when = _as_utc_aware(opted_out_at or utc_now())
     with database.SessionLocal() as session:
         client = session.query(Client).filter_by(id=client_id).with_for_update().one()
-        lead = session.query(Lead).filter_by(
-            client_id=client_id, phone=normalized
-        ).with_for_update().one_or_none()
+        lead = (
+            session.query(Lead)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         if lead is None and not _is_tenant_operator(client, normalized):
             raise WhatsAppPolicyError("Opt-out phone is not a tenant recipient")
-        opt_out = session.query(WhatsAppOptOut).filter_by(
-            client_id=client_id, phone=normalized
-        ).with_for_update().one_or_none()
+        opt_out = (
+            session.query(WhatsAppOptOut)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         newly_recorded = opt_out is None
         if opt_out is None:
             opt_out = WhatsAppOptOut(
@@ -250,24 +276,29 @@ def record_opt_out(
             session.add(opt_out)
         if lead is not None:
             lead.whatsapp_opted_out_at = lead.whatsapp_opted_out_at or when
-        consent = session.query(WhatsAppConsentRecord).filter_by(
-            client_id=client_id, phone=normalized
-        ).with_for_update().one_or_none()
+        consent = (
+            session.query(WhatsAppConsentRecord)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         if consent is not None and consent.revoked_at is None:
             consent.revoked_at = when
             consent.revocation_reason = reason
-        session.add(WhatsAppPolicyDecision(
-            audit_key=str(uuid4()),
-            client_id=client_id,
-            phone=normalized,
-            action="opt_out",
-            decision="applied",
-            reason_code=reason,
-            policy_version=policy_version,
-            session_open=lead is not None and _session_open(session, lead.id, when),
-            provider_outcome="not_applicable",
-            created_at=when,
-        ))
+        session.add(
+            WhatsAppPolicyDecision(
+                audit_key=str(uuid4()),
+                client_id=client_id,
+                phone=normalized,
+                action="opt_out",
+                decision="applied",
+                reason_code=reason,
+                policy_version=policy_version,
+                session_open=lead is not None and _session_open(session, lead.id, when),
+                provider_outcome="not_applicable",
+                created_at=when,
+            )
+        )
         session.commit()
         return newly_recorded
 
@@ -355,8 +386,7 @@ def find_approved_template(
             WhatsAppTemplate.verification_reference.isnot(None),
             WhatsAppTemplate.meta_template_id.isnot(None),
             WhatsAppTemplate.verified_waba_id == credentials.waba_id,
-            WhatsAppTemplate.verified_phone_number_id
-            == credentials.phone_number_id,
+            WhatsAppTemplate.verified_phone_number_id == credentials.phone_number_id,
             WhatsAppTemplate.retired_at.is_(None),
         )
         .order_by(WhatsAppTemplate.verified_at.desc(), WhatsAppTemplate.id.desc())
@@ -376,10 +406,18 @@ def preflight_text(
         raise WhatsAppPolicyError("WhatsApp send policy requires the durable database")
     normalized = normalize_phone(phone)
     with database.SessionLocal() as session:
-        client = session.query(Client).filter_by(id=client_id).with_for_update().one_or_none()
-        lead = session.query(Lead).filter_by(
-            client_id=client_id, phone=normalized
-        ).with_for_update().one_or_none()
+        client = (
+            session.query(Client)
+            .filter_by(id=client_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        lead = (
+            session.query(Lead)
+            .filter_by(client_id=client_id, phone=normalized)
+            .with_for_update()
+            .one_or_none()
+        )
         if client is None or lead is None:
             raise WhatsAppPolicyError("Outbound recipient is not a tenant lead")
         decision = evaluate_locked(
@@ -406,9 +444,11 @@ def get_operator_template(*, client_id: int, event: str) -> OperatorTemplate | N
         raise ValueError("Unknown operator notification event")
     with database.SessionLocal() as session:
         client = session.query(Client).filter_by(id=client_id).one_or_none()
-        policy = session.query(WhatsAppTenantPolicy).filter_by(
-            client_id=client_id
-        ).one_or_none()
+        policy = (
+            session.query(WhatsAppTenantPolicy)
+            .filter_by(client_id=client_id)
+            .one_or_none()
+        )
         if client is None or policy is None or not client.admin_phone:
             return None
         name_field, language_field = fields[event]
@@ -441,7 +481,9 @@ def evaluate_locked(
 ) -> PolicyDecision:
     """Evaluate policy while caller holds tenant and lead row locks."""
     current = _as_utc_aware(now or utc_now())
-    policy = session.query(WhatsAppTenantPolicy).filter_by(client_id=client.id).one_or_none()
+    policy = (
+        session.query(WhatsAppTenantPolicy).filter_by(client_id=client.id).one_or_none()
+    )
     active_policy = policy or _PolicyDefaults()
     version = active_policy.policy_version
     recipient = lead.phone if lead is not None else normalize_phone(phone or "")
@@ -464,14 +506,16 @@ def evaluate_locked(
         and _authoritative_takeover_active(client.id, recipient, lead)
     ):
         allowed, reason = False, "human_takeover"
-    elif (lead is not None and lead.whatsapp_opted_out_at is not None) or session.query(WhatsAppOptOut.id).filter_by(
-        client_id=client.id, phone=recipient
-    ).first() is not None:
+    elif (lead is not None and lead.whatsapp_opted_out_at is not None) or session.query(
+        WhatsAppOptOut.id
+    ).filter_by(client_id=client.id, phone=recipient).first() is not None:
         allowed, reason = False, "opted_out"
     else:
-        consent = session.query(WhatsAppConsentRecord).filter_by(
-            client_id=client.id, phone=recipient
-        ).one_or_none()
+        consent = (
+            session.query(WhatsAppConsentRecord)
+            .filter_by(client_id=client.id, phone=recipient)
+            .one_or_none()
+        )
         if consent is None:
             allowed, reason = False, "consent_absent"
         elif consent.revoked_at is not None:
@@ -480,7 +524,9 @@ def evaluate_locked(
             allowed, reason = False, "consent_not_effective"
         elif active_credentials is None:
             allowed, reason = False, "meta_identity_unconfigured"
-        elif lead is not None and lead.status in tuple(active_policy.excluded_lead_stages or ()):
+        elif lead is not None and lead.status in tuple(
+            active_policy.excluded_lead_stages or ()
+        ):
             allowed, reason = False, "lead_stage_excluded"
         elif _in_quiet_hours(active_policy, current):
             allowed, reason = False, "quiet_hours"
@@ -493,11 +539,15 @@ def evaluate_locked(
             allowed, reason = False, "template_unapproved"
         elif message_type != "template" and not session_open:
             allowed, reason = False, "session_closed"
-        elif _daily_send_count(session, client.id, active_policy, current) >= active_policy.daily_cap:
+        elif (
+            _daily_send_count(session, client.id, active_policy, current)
+            >= active_policy.daily_cap
+        ):
             allowed, reason = False, "daily_cap"
-        elif _frequency_send_count(
-            session, client.id, recipient, active_policy, current
-        ) >= active_policy.max_messages_per_window:
+        elif (
+            _frequency_send_count(session, client.id, recipient, active_policy, current)
+            >= active_policy.max_messages_per_window
+        ):
             allowed, reason = False, "frequency_limit"
 
     decision = PolicyDecision(
@@ -527,9 +577,11 @@ def set_provider_audit_outcome(
     failure_category: str | None = None,
 ) -> None:
     session.flush()
-    row = session.query(WhatsAppPolicyDecision).filter_by(
-        audit_key=decision.audit_key
-    ).one()
+    row = (
+        session.query(WhatsAppPolicyDecision)
+        .filter_by(audit_key=decision.audit_key)
+        .one()
+    )
     row.provider_outcome = outcome
     row.provider_failure_category = failure_category
 
@@ -615,12 +667,14 @@ def send_immediate_template(
     phone: str,
     template_name: str,
     language: str,
+    template_id: int | None = None,
     sender: Callable[..., str | None],
     action: str,
     correlation_id: str | None = None,
     parameters: list[Any] | dict[str, Any] | None = None,
     recipient_kind: str = "lead",
     verifier: Callable[..., Any] | None = None,
+    final_guard: Callable[[Any, Client, Lead | None], str | None] | None = None,
 ) -> ImmediateSendResult:
     return _send_immediate(
         client_id=client_id,
@@ -629,6 +683,7 @@ def send_immediate_template(
         message_type="template",
         template_name=template_name,
         language=language,
+        template_id=template_id,
         sender=lambda recipient, credentials, components: (
             sender(
                 recipient,
@@ -642,6 +697,7 @@ def send_immediate_template(
         correlation_id=correlation_id,
         recipient_kind=recipient_kind,
         verifier=verifier,
+        final_guard=final_guard,
     )
 
 
@@ -656,12 +712,14 @@ def _send_immediate(
         str | None,
     ],
     template_name: str | None = None,
+    template_id: int | None = None,
     language: str = "en",
     correlation_id: str | None = None,
     allow_human_takeover: bool = False,
     recipient_kind: str = "lead",
     verifier: Callable[..., Any] | None = None,
     template_parameters: list[Any] | dict[str, Any] | None = None,
+    final_guard: Callable[[Any, Client, Lead | None], str | None] | None = None,
 ) -> ImmediateSendResult:
     if database.SessionLocal is None:
         raise WhatsAppPolicyError("WhatsApp send policy requires the durable database")
@@ -670,12 +728,11 @@ def _send_immediate(
     provider_id: str | None = None
     try:
         with database.SessionLocal() as session:
-            client = session.query(Client).filter_by(
-                id=client_id
-            ).with_for_update().one_or_none()
-            lead = session.query(Lead).filter_by(
-                client_id=client_id, phone=normalized
-            ).with_for_update().one_or_none()
+            client, lead = db_client.lock_tenant_lead(
+                session,
+                client_id=client_id,
+                phone=normalized,
+            )
             if client is None:
                 raise WhatsAppPolicyError("Outbound tenant does not exist")
             if recipient_kind == "operator":
@@ -689,18 +746,21 @@ def _send_immediate(
                 credentials = None
 
             template = None
-            if (
-                message_type == "template"
-                and template_name
-                and credentials is not None
-            ):
-                row = session.query(WhatsAppTemplate).filter_by(
+            if message_type == "template" and template_name and credentials is not None:
+                template_query = session.query(WhatsAppTemplate).filter_by(
                     client_id=client_id,
                     name=template_name,
                     language=language,
-                ).order_by(
-                    WhatsAppTemplate.id.desc()
-                ).with_for_update().first()
+                )
+                if template_id is not None:
+                    template_query = template_query.filter(
+                        WhatsAppTemplate.id == template_id
+                    )
+                row = (
+                    template_query.order_by(WhatsAppTemplate.id.desc())
+                    .with_for_update()
+                    .first()
+                )
                 if row is not None and row.retired_at is None:
                     _refresh_template_locked(
                         row=row,
@@ -717,6 +777,10 @@ def _send_immediate(
                     language=language,
                     now=utc_now(),
                 )
+                if template_id is not None and (
+                    template is None or template.id != template_id
+                ):
+                    template = None
             decision = evaluate_locked(
                 session,
                 client=client,
@@ -737,6 +801,17 @@ def _send_immediate(
                 )
                 session.commit()
                 return ImmediateSendResult("blocked", decision.reason_code)
+            if final_guard is not None:
+                guard_reason = final_guard(session, client, lead)
+                if guard_reason:
+                    set_provider_audit_outcome(
+                        session,
+                        decision,
+                        outcome="blocked",
+                        failure_category=guard_reason,
+                    )
+                    session.commit()
+                    return ImmediateSendResult("blocked", guard_reason)
             if credentials is None:
                 raise WhatsAppPolicyError("Tenant Meta identity is unavailable")
 
@@ -765,14 +840,14 @@ def _send_immediate(
         if decision is not None and decision.allowed:
             persist_policy_decision(
                 decision,
-                provider_outcome=(
-                    "accepted_uncommitted" if provider_id else "failed"
-                ),
+                provider_outcome=("accepted_uncommitted" if provider_id else "failed"),
                 failure_category=classify_provider_failure(
                     exc,
                     provider_accepted=provider_id is not None,
                 ),
             )
+        if provider_id is not None:
+            raise ProviderOutcomeUncertain(str(exc)) from exc
         raise
 
 
@@ -789,8 +864,8 @@ def _session_open(session, lead_id: int, now: datetime) -> bool:
     if last_inbound is None:
         return False
     age = _as_utc_aware(now) - _as_utc_aware(last_inbound)
-    return timedelta(0) <= age <= timedelta(
-        seconds=config.WHATSAPP_SESSION_WINDOW_SECONDS
+    return (
+        timedelta(0) <= age <= timedelta(seconds=config.WHATSAPP_SESSION_WINDOW_SECONDS)
     )
 
 
@@ -819,25 +894,33 @@ def _daily_send_count(session, client_id: int, policy, now: datetime) -> int:
     local = _as_utc_aware(now).astimezone(tz)
     local_midnight = datetime.combine(local.date(), time.min, tzinfo=tz)
     since = local_midnight.astimezone(timezone.utc)
-    return session.query(WhatsAppPolicyDecision).filter(
-        WhatsAppPolicyDecision.client_id == client_id,
-        WhatsAppPolicyDecision.decision == "allowed",
-        WhatsAppPolicyDecision.action.endswith("_send"),
-        WhatsAppPolicyDecision.created_at >= since,
-    ).count()
-
-
-def _frequency_send_count(session, client_id: int, phone: str, policy, now: datetime) -> int:
-    since = _as_utc_aware(now) - timedelta(
-        seconds=policy.frequency_window_seconds
+    return (
+        session.query(WhatsAppPolicyDecision)
+        .filter(
+            WhatsAppPolicyDecision.client_id == client_id,
+            WhatsAppPolicyDecision.decision == "allowed",
+            WhatsAppPolicyDecision.action.endswith("_send"),
+            WhatsAppPolicyDecision.created_at >= since,
+        )
+        .count()
     )
-    return session.query(WhatsAppPolicyDecision).filter(
-        WhatsAppPolicyDecision.client_id == client_id,
-        WhatsAppPolicyDecision.phone == phone,
-        WhatsAppPolicyDecision.decision == "allowed",
-        WhatsAppPolicyDecision.action.endswith("_send"),
-        WhatsAppPolicyDecision.created_at >= since,
-    ).count()
+
+
+def _frequency_send_count(
+    session, client_id: int, phone: str, policy, now: datetime
+) -> int:
+    since = _as_utc_aware(now) - timedelta(seconds=policy.frequency_window_seconds)
+    return (
+        session.query(WhatsAppPolicyDecision)
+        .filter(
+            WhatsAppPolicyDecision.client_id == client_id,
+            WhatsAppPolicyDecision.phone == phone,
+            WhatsAppPolicyDecision.decision == "allowed",
+            WhatsAppPolicyDecision.action.endswith("_send"),
+            WhatsAppPolicyDecision.created_at >= since,
+        )
+        .count()
+    )
 
 
 def _as_utc_aware(value: datetime) -> datetime:
@@ -904,8 +987,7 @@ def _refresh_template_locked(
             and getattr(result, "status", None) == "approved"
             and getattr(result, "category", None) == row.category
             and getattr(result, "waba_id", None) == credentials.waba_id
-            and getattr(result, "phone_number_id", None)
-            == credentials.phone_number_id
+            and getattr(result, "phone_number_id", None) == credentials.phone_number_id
             and returned_signature == expected_signature
             and getattr(result, "variable_count", None)
             == sum(len(item["parameters"]) for item in expected_signature)
@@ -997,8 +1079,7 @@ def _template_is_eligible(
         and template.meta_status == "approved"
         and template.verified_at is not None
         and template.verification_expires_at is not None
-        and _as_utc_aware(template.verification_expires_at)
-        > _as_utc_aware(now)
+        and _as_utc_aware(template.verification_expires_at) > _as_utc_aware(now)
         and template.verification_reference
         and template.meta_template_id
         and template.verified_waba_id == credentials.waba_id

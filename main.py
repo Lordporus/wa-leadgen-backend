@@ -25,6 +25,7 @@ from app.api.routers import (
     settings,
     whatsapp as whatsapp_routes,
     whatsapp_policy as whatsapp_policy_routes,
+    whatsapp_sequences as whatsapp_sequences_routes,
 )
 from app.api.runtime import calendly, logger, store, whatsapp
 from app.core.config import (
@@ -162,7 +163,8 @@ def calendly_sync_job():
             logger.info(f"Unmatched booking (phone {phone} not in Leads): {booking.get('name')}")
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(follow_up_job, 'interval', hours=1)
+# Phase 8 replaces legacy web-process follow-ups. Sequence ticking is started
+# and rescheduled by the dedicated RQ worker only.
 scheduler.add_job(calendly_sync_job, 'interval', minutes=5)
 # Nightly analytics rollup — 02:00 IST every day. Rolls up YESTERDAY (IST) for
 # every active tenant. CronTrigger timezone is explicit so it fires at 2 AM IST
@@ -226,4 +228,5 @@ app.include_router(billing.router)
 app.include_router(health.router)
 app.include_router(whatsapp_routes.router)
 app.include_router(whatsapp_policy_routes.router)
+app.include_router(whatsapp_sequences_routes.router)
 app.include_router(analytics.router)

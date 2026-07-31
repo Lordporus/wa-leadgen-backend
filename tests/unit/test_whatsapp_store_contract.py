@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 from sqlalchemy import UniqueConstraint, create_engine, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.clients.airtable_client import AirtableClient
@@ -40,6 +40,7 @@ def _dual_store():
     primary.update_lead_status_by_id.return_value = record
     primary.append_message.return_value = True
     secondary = MagicMock()
+    secondary.persist_inbound_message_required.return_value = True
     secondary_record: dict[str, Any] = {
         "id": "42",
         "fields": {
@@ -150,14 +151,14 @@ def test_dual_store_forwards_tenant_context_to_every_write():
         "wamid.offline",
         client_id=7,
     )
-    secondary.append_message.assert_called_once_with(
+    secondary.persist_inbound_message_required.assert_called_once_with(
         "919999999999",
-        "inbound",
         "Offline body",
         "text",
         "wamid.offline",
         client_id=7,
     )
+    secondary.append_message.assert_not_called()
     secondary.update_message_status.assert_called_once_with(
         "wamid.offline",
         "delivered",
@@ -185,6 +186,70 @@ def test_dual_store_forwards_tenant_context_to_every_write():
         "Warm",
         client_id=7,
     )
+
+
+def test_dual_inbound_persists_postgres_before_airtable():
+    store, primary, secondary = _dual_store()
+    order = []
+    secondary.persist_inbound_message_required.side_effect = (
+        lambda *_args, **_kwargs: order.append("postgres") or True
+    )
+    primary.append_message.side_effect = (
+        lambda *_args, **_kwargs: order.append("airtable") or True
+    )
+
+    assert store.append_message(
+        "919999999999",
+        "inbound",
+        "Reply",
+        "text",
+        "wamid.postgres-first",
+        client_id=7,
+    )
+
+    assert order == ["postgres", "airtable"]
+    secondary.append_message.assert_not_called()
+
+
+def test_dual_inbound_postgres_failure_prevents_airtable_completion():
+    store, primary, secondary = _dual_store()
+    failure = OperationalError("INSERT", {}, RuntimeError("offline"))
+    secondary.persist_inbound_message_required.side_effect = failure
+
+    with pytest.raises(OperationalError):
+        store.append_message(
+            "919999999999",
+            "inbound",
+            "Reply",
+            "text",
+            "wamid.postgres-failed",
+            client_id=7,
+        )
+
+    primary.append_message.assert_not_called()
+
+
+def test_dual_outbound_ordering_remains_primary_then_secondary():
+    store, primary, secondary = _dual_store()
+    order = []
+    primary.append_message.side_effect = (
+        lambda *_args, **_kwargs: order.append("primary") or True
+    )
+    secondary.append_message.side_effect = (
+        lambda *_args, **_kwargs: order.append("secondary") or True
+    )
+
+    assert store.append_message(
+        "919999999999",
+        "outbound",
+        "Response",
+        "text",
+        "wamid.outbound",
+        client_id=7,
+    )
+
+    assert order == ["primary", "secondary"]
+    secondary.persist_inbound_message_required.assert_not_called()
 
 
 def test_concrete_store_methods_require_tenant_argument():
@@ -486,14 +551,14 @@ def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
         "wamid.inbound",
         client_id=7,
     )
-    secondary.append_message.assert_called_once_with(
+    secondary.persist_inbound_message_required.assert_called_once_with(
         "919999999999",
-        "inbound",
         "Offline hello",
         "text",
         "wamid.inbound",
         client_id=7,
     )
+    secondary.append_message.assert_not_called()
     primary.update_lead_status.assert_called_once_with(
         "919999999999",
         "Contacted",
