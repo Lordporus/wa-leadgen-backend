@@ -54,6 +54,35 @@ def test_replay_refuses_unknown_send_outcomes(monkeypatch):
         raise AssertionError("unknown provider outcomes must not be replayed")
 
 
+def test_failed_replay_is_forced_through_resumed_validation_worker(monkeypatch):
+    from app.api import runtime
+
+    intent = type("Intent", (), {"state": "failed", "body": "persisted", "failure_category": "provider_exception", "failure_reason": "offline"})()
+
+    class Query:
+        def filter_by(self, **_): return self
+        def with_for_update(self): return self
+        def one_or_none(self): return intent
+
+    class Session:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def query(self, _): return Query()
+        def commit(self): pass
+
+    queued = []
+
+    class Queue:
+        def enqueue(self, function, **kwargs):
+            queued.append((function, kwargs))
+            return type("Job", (), {"id": "job-phase9-replay"})()
+
+    monkeypatch.setattr(whatsapp_outbox.database, "SessionLocal", Session)
+    monkeypatch.setattr(runtime, "webhook_queue", Queue())
+    assert whatsapp_outbox.replay_outbound_intent(intent_id=4, client_id=7) == "job-phase9-replay"
+    assert queued == [(whatsapp_outbox.process_outbound_intent, {"intent_id": 4, "client_id": 7})]
+
+
 def test_crashed_generation_recovers_or_dispatches_persisted_body(monkeypatch):
     def claim(intent):
         class Query:

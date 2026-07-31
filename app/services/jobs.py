@@ -15,14 +15,14 @@ from app.core.config import (
 )
 from app.clients.whatsapp_client import WhatsAppClient
 from app.store.store import get_store
-from app.services.guardrails import scan_input, redact_pii, score_confidence, CONFIDENCE_THRESHOLD
 from app.core import database
 from app.core.models import Lead, Client
-from app.services.rag import retrieve_context
 from app.services.usage import log_usage, estimate_tokens, check_limit, COST_PER_1K_INPUT_TOKENS, COST_PER_1K_OUTPUT_TOKENS
 from app.services import tenant
 from app.services import whatsapp_outbox
 from app.services import whatsapp_policy
+from app.services import ai_decision
+from app.services.guardrails import minimize_sensitive_text, scan_input
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def process_webhook_message(
     if not user_text:
         return
 
-    logger.info(f"[RQ] Processing message from {sender_phone}: {user_text}")
+    logger.info("[RQ] Processing tenant-scoped WhatsApp message", extra={"client_id": current_client_id, "event_id": msg_id})
 
     # ── 3. Get or create lead ────────────────────────────────────────────
     lead = store.get_lead(sender_phone, client_id=current_client_id)
@@ -188,13 +188,8 @@ def process_webhook_message(
             )
             return
 
-    # ── 4c. Input guardrails ─────────────────────────────────────────────
-    is_safe, refusal = scan_input(user_text)
-    if not is_safe and refusal is None:
-        logger.error("Input guardrail blocked content without a refusal message")
-        return
-    # Phase 6: a worker event owns one durable reply intent. Legacy direct
-    # callers retain their previous behavior until they supply an event id.
+    # Phase 9: the durable intent is claimed only after all pre-AI Phase 7
+    # policy gates and takeover checks. Every later send repeats them under lock.
     intent_id = None
     if inbound_event_id is not None:
         intent_id = whatsapp_outbox.create_or_get_intent(
@@ -208,112 +203,49 @@ def process_webhook_message(
         if claim != "generate":
             return
 
-    if not is_safe:
-        assert refusal is not None
-        logger.warning(f"Prompt injection blocked for {sender_phone}: sending safe refusal.")
-        if intent_id is None:
-            send_result = whatsapp_policy.send_immediate_text(
-                client_id=current_client_id,
-                phone=sender_phone,
-                text=refusal,
-                sender=whatsapp.send_message,
-                action="guardrail_refusal_send",
-                correlation_id=correlation_id,
-            )
-            if send_result.state == "sent" and send_result.provider_message_id:
-                store.append_message(
-                    sender_phone, direction="outbound", message=refusal,
-                    msg_type="text", wa_message_id=send_result.provider_message_id,
-                    client_id=current_client_id,
-                )
-        else:
-            whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=refusal)
-            result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
-            if result.newly_sent and result.provider_message_id:
-                store.append_message(sender_phone, direction="outbound", message=refusal, msg_type="text", wa_message_id=result.provider_message_id, client_id=current_client_id)
+    if database.SessionLocal is None:
         return
-
-    llm_text = redact_pii(user_text)
-
-    # ── 4d. RAG context retrieval ────────────────────────────────────────
-    rag_context = ""
-    if current_client_id:
-        rag_chunks = retrieve_context(current_client_id, llm_text)
-        if rag_chunks:
-            rag_context = "\n\n---\nKNOWLEDGE BASE (use this to answer the customer):\n"
-            rag_context += "\n---\n".join(rag_chunks)
-            rag_context += "\n---\n"
-            logger.info(f"RAG injected {len(rag_chunks)} chunks for {sender_phone}.")
-
-    # ── 5. Generate AI reply ─────────────────────────────────────────────
-    last_message = lead.get("fields", {}).get("Last_Message", "")
-    updated_last_message = last_message + f"\n[INBOUND - text]\n{user_text}\n"
-
-    if rag_context:
-        original_prompt = req_gemini._system_prompt
-        req_gemini._system_prompt = original_prompt + rag_context
-
-    parsed_history = req_gemini.parse_conversation_history(updated_last_message)
-    ai_reply = req_gemini.generate_response_with_history(parsed_history, llm_text)
-
-    if rag_context:
-        req_gemini._system_prompt = original_prompt
-
-    if not ai_reply or not ai_reply.strip():
-        logger.error(f"AI returned empty reply for {sender_phone}. Sending fallback.")
-        ai_reply = "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
-    elif len(ai_reply) > 4096:
-        logger.error(f"AI reply too long ({len(ai_reply)} chars) for {sender_phone}. Truncating.")
-        ai_reply = ai_reply[:4093] + "..."
-
-    # ── 5b. Output guardrail — confidence scoring ────────────────────────
-    system_prompt = getattr(req_gemini, "_system_prompt", None)
-    confidence = score_confidence(ai_reply, system_prompt)
-    if confidence < CONFIDENCE_THRESHOLD:
-        logger.warning(
-            f"Low confidence ({confidence:.2f}) for tenant {current_client_id} "
-            f"— triggering human takeover, AI reply withheld."
-        )
-        store.update_human_takeover_by_id(
-            lead["id"],
-            True,
-            client_id=current_client_id,
-        )
+    with database.SessionLocal() as session:
+        durable_lead = session.query(Lead).filter_by(client_id=current_client_id, phone=sender_phone).one_or_none()
+    if durable_lead is None:
+        logger.error("AI reply withheld: tenant lead has no durable row")
         return
-
-    # ── 6. Send WhatsApp reply ───────────────────────────────────────────
-    if intent_id is None:
-        send_result = whatsapp_policy.send_immediate_text(
-            client_id=current_client_id,
-            phone=sender_phone,
-            text=ai_reply,
-            sender=whatsapp.send_message,
-            action="legacy_ai_reply_send",
-            correlation_id=correlation_id,
-        )
-        wamid = send_result.provider_message_id
-        if send_result.state == "sent" and wamid:
-            store.append_message(
-                sender_phone, direction="outbound", message=ai_reply,
-                msg_type="text", wa_message_id=wamid, client_id=current_client_id,
-            )
-        else:
-            return
+    if not scan_input(user_text)[0]:
+        result = ai_decision.reject_input(client_id=current_client_id, lead_id=durable_lead.id, correlation_id=correlation_id, reason="prompt_injection", intent_id=intent_id)
     else:
-        whatsapp_outbox.set_generated_body(intent_id=intent_id, client_id=current_client_id, body=ai_reply)
-        result = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message)
-        wamid = result.provider_message_id
-        if result.newly_sent and wamid:
-            store.append_message(sender_phone, direction="outbound", message=ai_reply, msg_type="text", wa_message_id=wamid, client_id=current_client_id)
-        elif result.state != "sent":
-            return
-
-    updated_last_message += f"\n[OUTBOUND - text]\n{ai_reply}\n"
+        result = ai_decision.evaluate(client_id=current_client_id, lead_id=durable_lead.id, inbound_text=user_text, gemini=req_gemini, correlation_id=correlation_id, intent_id=intent_id)
+    if result.value.decision != "REPLY":
+        if intent_id is not None:
+            ai_decision.finalize_non_reply(
+                intent_id=intent_id,
+                client_id=current_client_id,
+                lead_id=durable_lead.id,
+                result=result,
+            )
+        else:
+            ai_decision.record_outcome(client_id=current_client_id, lead_id=durable_lead.id, result=result, outcome="escalated" if result.value.decision == "ESCALATE" else result.value.decision.lower())
+        if result.value.decision == "ESCALATE":
+            store.update_human_takeover_by_id(lead["id"], True, client_id=current_client_id)
+        return
+    if intent_id is None:
+        # Webhook jobs always supply an event id; retain fail-closed behavior for legacy callers.
+        ai_decision.record_outcome(client_id=current_client_id, lead_id=durable_lead.id, result=result, outcome="no_durable_intent")
+        return
+    try:
+        ai_decision.queue_reply(intent_id=intent_id, client_id=current_client_id, lead_id=durable_lead.id, result=result)
+        dispatch = whatsapp_outbox.dispatch_intent(intent_id=intent_id, client_id=current_client_id, sender=whatsapp.send_message, final_guard=ai_decision.final_send_guard(result, intent_id))
+    except Exception:
+        ai_decision.record_outcome(client_id=current_client_id, lead_id=durable_lead.id, result=result, outcome="failed")
+        raise
+    ai_decision.record_outcome(client_id=current_client_id, lead_id=durable_lead.id, result=result, outcome=dispatch.state)
+    if dispatch.state != "sent":
+        return
+    updated_last_message = result.context_text
 
     # ── 6b. Log AI usage ────────────────────────────────────────────────
     if current_client_id:
-        input_tokens = estimate_tokens(llm_text)
-        output_tokens = estimate_tokens(ai_reply)
+        input_tokens = result.token_estimate
+        output_tokens = estimate_tokens(result.rendered_text)
         total_tokens = input_tokens + output_tokens
         cost = (input_tokens / 1000) * COST_PER_1K_INPUT_TOKENS + (output_tokens / 1000) * COST_PER_1K_OUTPUT_TOKENS
         log_usage(current_client_id, "ai_response", total_tokens, round(cost, 6))
@@ -322,7 +254,7 @@ def process_webhook_message(
     lead_name = lead.get("fields", {}).get("Name", "Unknown") if isinstance(lead, dict) else lead.business_name
 
     _run_analytics(
-        store, sender_phone, updated_last_message, user_text,
+        store, sender_phone, updated_last_message, minimize_sensitive_text(user_text, known_names=[lead_name]),
         lead_name, req_gemini, req_won_stages, req_lost_stages, current_client_id,
     )
 
