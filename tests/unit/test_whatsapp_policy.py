@@ -87,8 +87,8 @@ def policy_db(monkeypatch):
     engine.dispose()
 
 
-def _add_consent(factory, *, revoked=False):
-    now = datetime.now(timezone.utc)
+def _add_consent(factory, *, revoked=False, effective_at=None):
+    now = effective_at or datetime.now(timezone.utc)
     with factory() as session:
         session.add(WhatsAppConsentRecord(
             client_id=1,
@@ -332,7 +332,7 @@ def test_quiet_hours_daily_cap_and_stage_exclusions(
     policy_db, policy_changes, lead_stage, reason
 ):
     now = datetime(2026, 7, 30, 23, 0, 0, tzinfo=timezone.utc)
-    _add_consent(policy_db)
+    _add_consent(policy_db, effective_at=now)
     _add_inbound(policy_db, now)
     with policy_db() as session:
         policy = session.query(WhatsAppTenantPolicy).one()
