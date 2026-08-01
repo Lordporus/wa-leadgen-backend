@@ -1,0 +1,89 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Mount certificate material here only after separately approved issuance.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - qualify_private
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE must be set}
+    restart: unless-stopped
+    env_file:
+      - /etc/qualify/frontend.env
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - qualify_private
+
+  api:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE must be set}
+    restart: unless-stopped
+    env_file:
+      - /etc/qualify/backend.env
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - qualify_private
+
+  worker:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE must be set}
+    restart: unless-stopped
+    env_file:
+      - /etc/qualify/backend.env
+    command: ["python", "worker.py"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - qualify_private
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - qualify_redis_data:/data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - qualify_private
+
+networks:
+  qualify_private:
+    driver: bridge
+
+volumes:
+  qualify_redis_data:

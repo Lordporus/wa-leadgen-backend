@@ -1,0 +1,59 @@
+name: Deploy backend to Azure VPS
+
+on:
+  workflow_run:
+    workflows: [Backend CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: azure-production-backend
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/lordporus/wa-leadgen-backend
+  DEPLOY_ROOT: /opt/qualify/wa-leadgen-backend
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
+          build-args: GIT_SHA=${{ github.event.workflow_run.head_sha }}
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.AZURE_VPS_SSH_PRIVATE_KEY }}
+      - name: Stage deployment files and deploy
+        env:
+          HOST: ${{ secrets.AZURE_VPS_HOST }}
+          USER: ${{ secrets.AZURE_VPS_USER }}
+          KNOWN_HOSTS: ${{ secrets.AZURE_VPS_SSH_KNOWN_HOSTS }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh "$USER@$HOST" "mkdir -p '$DEPLOY_ROOT/deploy' '$DEPLOY_ROOT/scripts'"
+          scp -r deploy/. "$USER@$HOST:$DEPLOY_ROOT/deploy/"
+          scp scripts/deploy-azure.sh "$USER@$HOST:$DEPLOY_ROOT/scripts/deploy-azure.sh"
+          ssh "$USER@$HOST" "chmod 750 '$DEPLOY_ROOT/scripts/deploy-azure.sh'"
+          printf '%s' "$GHCR_READ_TOKEN" | ssh "$USER@$HOST" "docker login ghcr.io -u '$GHCR_USERNAME' --password-stdin"
+          ssh "$USER@$HOST" "DEPLOY_ROOT='$DEPLOY_ROOT' '$DEPLOY_ROOT/scripts/deploy-azure.sh' backend '$IMAGE:${{ github.event.workflow_run.head_sha }}' '${{ github.event.workflow_run.head_sha }}'"
