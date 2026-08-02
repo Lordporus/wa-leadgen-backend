@@ -5,8 +5,15 @@ on:
     workflows: [Backend CI]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Optional full SHA from main; blank uses the current main SHA
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
   packages: write
 
@@ -16,17 +23,58 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/lordporus/wa-leadgen-backend
-  DEPLOY_ROOT: /opt/qualify/wa-leadgen-backend
+  DEPLOY_ROOT: /opt/qualify/backend
 
 jobs:
   deploy:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Resolve immutable main commit
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            target_sha="$WORKFLOW_RUN_SHA"
+          else
+            target_sha="${REQUESTED_SHA:-$DEFAULT_SHA}"
+          fi
+          [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::A full lowercase commit SHA is required"; exit 1; }
+          echo "sha=$target_sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 0
+      - name: Require target commit to belong to main
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+      - name: Require successful Backend CI push run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          successful_runs="$(gh run list \
+            --workflow ci.yml \
+            --commit "$TARGET_SHA" \
+            --event push \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq 'length')"
+          [[ "$successful_runs" == "1" ]] || { echo "::error::Target SHA has no successful Backend CI push run"; exit 1; }
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -36,8 +84,8 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
-          build-args: GIT_SHA=${{ github.event.workflow_run.head_sha }}
+          tags: ${{ env.IMAGE }}:${{ steps.target.outputs.sha }}
+          build-args: GIT_SHA=${{ steps.target.outputs.sha }}
       - uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: ${{ secrets.AZURE_VPS_SSH_PRIVATE_KEY }}
@@ -49,11 +97,14 @@ jobs:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: |
-          mkdir -p ~/.ssh
+          install -m 700 -d ~/.ssh
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh "$USER@$HOST" "mkdir -p '$DEPLOY_ROOT/deploy' '$DEPLOY_ROOT/scripts'"
-          scp -r deploy/. "$USER@$HOST:$DEPLOY_ROOT/deploy/"
-          scp scripts/deploy-azure.sh "$USER@$HOST:$DEPLOY_ROOT/scripts/deploy-azure.sh"
-          ssh "$USER@$HOST" "chmod 750 '$DEPLOY_ROOT/scripts/deploy-azure.sh'"
-          printf '%s' "$GHCR_READ_TOKEN" | ssh "$USER@$HOST" "docker login ghcr.io -u '$GHCR_USERNAME' --password-stdin"
-          ssh "$USER@$HOST" "DEPLOY_ROOT='$DEPLOY_ROOT' '$DEPLOY_ROOT/scripts/deploy-azure.sh' backend '$IMAGE:${{ github.event.workflow_run.head_sha }}' '${{ github.event.workflow_run.head_sha }}'"
+          chmod 600 ~/.ssh/known_hosts
+          ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh "${ssh_options[@]}" "$USER@$HOST" "mkdir -p '$DEPLOY_ROOT/deploy'"
+          scp "${ssh_options[@]}" -r deploy/. "$USER@$HOST:$DEPLOY_ROOT/deploy/"
+          {
+            printf '%s\n' "$GHCR_USERNAME"
+            printf '%s' "$GHCR_READ_TOKEN"
+          } | ssh "${ssh_options[@]}" "$USER@$HOST" \
+            "sudo -n /usr/local/sbin/qualify-deploy-azure backend '$IMAGE:${{ steps.target.outputs.sha }}' '${{ steps.target.outputs.sha }}'"
