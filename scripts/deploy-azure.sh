@@ -2,25 +2,24 @@
 set -Eeuo pipefail
 
 # Install this reviewed script as root-owned /usr/local/sbin/qualify-deploy-azure.
-# It accepts only immutable Qualify GHCR images, uses only the fixed rehearsal
+# It accepts only immutable Qualify GHCR images, uses the fixed live production
 # topology, never runs migrations, and holds the shared deployment lock through
 # verification or rollback.
 readonly PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 readonly DEPLOY_ROOT='/opt/qualify/backend'
 readonly COMPOSE_FILE="$DEPLOY_ROOT/deploy/docker-compose.production.yml"
-readonly COMPOSE_OVERRIDE='/tmp/qualify-step5-compose.override.yml'
 readonly DEPLOY_ENV='/etc/qualify/deployment.env'
-readonly BACKEND_ENV='/etc/qualify/rehearsal-backend.env'
-readonly FRONTEND_ENV='/etc/qualify/rehearsal-frontend.env'
+readonly BACKEND_ENV='/etc/qualify/backend.env'
+readonly FRONTEND_ENV='/etc/qualify/frontend.env'
 readonly DEPLOY_LOCK='/var/lock/qualify-production-deploy.lock'
 
 usage() {
-  echo "Usage: $0 backend <immutable-image> <commit-sha> | frontend <immutable-image> <commit-sha>" >&2
+  echo "Usage: $0 backend <immutable-image> <commit-sha> <compose-sha256> | frontend <immutable-image> <commit-sha>" >&2
   exit 64
 }
 
 [[ "$EUID" -eq 0 ]] || { echo "qualify-deploy-azure must run as root through sudo" >&2; exit 77; }
-[[ $# -eq 3 ]] || usage
+[[ $# -ge 3 && $# -le 4 ]] || usage
 component="$1"
 image="$2"
 commit_sha="$3"
@@ -28,11 +27,15 @@ commit_sha="$3"
 
 case "$component" in
   backend)
+    [[ $# -eq 4 && "$4" =~ ^[0-9a-f]{64}$ ]] || usage
+    expected_compose_sha="$4"
     key='BACKEND_IMAGE'
     services=(api worker)
     expected_image="ghcr.io/lordporus/wa-leadgen-backend:$commit_sha"
     ;;
   frontend)
+    [[ $# -eq 3 ]] || usage
+    expected_compose_sha=''
     key='FRONTEND_IMAGE'
     services=(frontend)
     expected_image="ghcr.io/lordporus/wa-leadgen-frontend:$commit_sha"
@@ -41,7 +44,7 @@ case "$component" in
 esac
 [[ "$image" == "$expected_image" ]] || { echo "image reference does not match the component and commit SHA" >&2; exit 65; }
 
-for command_name in docker flock stat mktemp chown chmod mv rm readlink; do
+for command_name in docker flock stat mktemp chown chmod mv rm readlink sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "$command_name is required" >&2; exit 69; }
 done
 
@@ -58,12 +61,18 @@ verify_protected_file() {
 }
 
 [[ -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || { echo "production Compose file is missing" >&2; exit 1; }
-for protected_path in "$COMPOSE_OVERRIDE" "$DEPLOY_ENV" "$BACKEND_ENV" "$FRONTEND_ENV"; do
-  verify_protected_file "$protected_path" || { echo "protected rehearsal file failed ownership or mode validation: $protected_path" >&2; exit 1; }
+for protected_path in "$DEPLOY_ENV" "$BACKEND_ENV" "$FRONTEND_ENV"; do
+  verify_protected_file "$protected_path" || { echo "protected production file failed ownership or mode validation: $protected_path" >&2; exit 1; }
 done
 
 exec 9>"$DEPLOY_LOCK" || { echo "cannot open shared deployment lock: $DEPLOY_LOCK" >&2; exit 73; }
 flock -n 9 || { echo "another Qualify deployment holds $DEPLOY_LOCK" >&2; exit 75; }
+
+if [[ -n "$expected_compose_sha" ]]; then
+  actual_compose_sha="$(sha256sum "$COMPOSE_FILE" | cut -d' ' -f1)"
+  [[ "$actual_compose_sha" == "$expected_compose_sha" ]] \
+    || { echo "live production Compose file does not match the reviewed backend commit" >&2; exit 78; }
+fi
 
 backend_image=''
 frontend_image=''
@@ -73,10 +82,10 @@ validate_stored_image() {
   local image_value="$2"
   case "$image_key" in
     BACKEND_IMAGE)
-      [[ "$image_value" == 'qualify-backend:rehearsal' || "$image_value" =~ ^ghcr\.io/lordporus/wa-leadgen-backend:[0-9a-f]{40}$ ]]
+      [[ "$image_value" =~ ^ghcr\.io/lordporus/wa-leadgen-backend:[0-9a-f]{40}$ ]]
       ;;
     FRONTEND_IMAGE)
-      [[ "$image_value" == 'qualify-frontend:rehearsal' || "$image_value" =~ ^ghcr\.io/lordporus/wa-leadgen-frontend:[0-9a-f]{40}$ ]]
+      [[ "$image_value" =~ ^ghcr\.io/lordporus/wa-leadgen-frontend:[0-9a-f]{40}$ ]]
       ;;
     *) return 1 ;;
   esac
@@ -133,7 +142,6 @@ compose() {
   docker compose \
     --env-file "$DEPLOY_ENV" \
     -f "$COMPOSE_FILE" \
-    -f "$COMPOSE_OVERRIDE" \
     "$@"
 }
 
@@ -188,6 +196,16 @@ verify_backend_health() {
   for _ in $(seq 1 24); do
     if compose exec -T api python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)); queue=data.get('whatsapp_queue', {}); assert data.get('status') == 'ok' and queue.get('ready') is True and int(queue.get('workers', 0)) >= 1" \
       && compose exec -T api python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)); queue=data.get('whatsapp_queue', {}); assert data.get('status') == 'ready' and queue.get('ready') is True and int(queue.get('workers', 0)) >= 1"; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+verify_api_compatibility() {
+  for _ in $(seq 1 24); do
+    if compose exec -T api python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)); assert data.get('status') == 'ready'; print(json.dumps(data, sort_keys=True))"; then
       return 0
     fi
     sleep 5
@@ -269,14 +287,25 @@ rollback_required=true
 
 set_deployment_image "$key" "$image"
 compose pull "${services[@]}"
-compose up -d --no-deps "${services[@]}"
-for service in "${services[@]}"; do
-  verify_service_running "$service"
-  verify_running_revision "$service" "$commit_sha"
-done
-if [[ "$component" == 'backend' ]]; then verify_backend_health; else verify_frontend_health; fi
+if [[ "$component" == "backend" ]]; then
+  # Keep the previous worker consuming while the new API proves it is ready,
+  # then replace and verify the worker from the same immutable image.
+  compose up -d --no-deps api
+  verify_service_running api
+  verify_running_revision api "$commit_sha"
+  verify_api_compatibility
+  compose up -d --no-deps worker
+  verify_service_running worker
+  verify_running_revision worker "$commit_sha"
+  verify_backend_health
+else
+  compose up -d --no-deps frontend
+  verify_service_running frontend
+  verify_running_revision frontend "$commit_sha"
+  verify_frontend_health
+fi
 
 release_verified=true
 rollback_required=false
 trap - ERR
-echo "rehearsal deployment verified for commit $commit_sha"
+echo "production deployment verified for commit $commit_sha"

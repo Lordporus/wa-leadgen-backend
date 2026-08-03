@@ -1,66 +1,107 @@
-# Phase 11 Render release and recovery runbook
+# Phase 11 Azure release and recovery runbook
 
-This runbook is the approval boundary for a WhatsApp release. It authorizes no
-automatic deployment, migration, secret change, or `MIGRATION_MODE` cutover.
+This runbook is the approval boundary for the existing Azure VPS production
+deployment. It does not authorize an infrastructure redesign, migration,
+secret change, DNS/TLS change, or `MIGRATION_MODE` cutover. The deployed
+Compose topology, `/opt/qualify/backend` backend root,
+`/opt/qualify/frontend` frontend root, and `/etc/qualify` runtime files remain
+the production contract. The shared Compose file remains backend-owned at
+`/opt/qualify/backend/deploy/docker-compose.production.yml`.
 
-## Release record and compatibility
+## Required release record
 
-Before staging, record the immutable commit SHA, Render service/image IDs,
-configuration manifest (environment variable names and non-secret flag values
-only), repository Alembic head, expected database revision, reviewer, release
-operator, rollback owner, and approval IDs. Confirm every schema change uses
-expand -> backfill -> contract across separately deployable releases. Do not
-combine a contract/destructive migration with a compatible web or worker
-rollback window. Applied revisions are never edited. Prefer a tested forward
-fix; downgrade only where the migration explicitly supports it and recovery is
-approved.
+Record this non-secret manifest before approving a production deployment:
 
-## Staging promotion
+- backend commit SHA and immutable GHCR image reference;
+- frontend commit SHA and immutable GHCR image reference, when changed;
+- SHA-256 of `deploy/docker-compose.production.yml`;
+- repository Alembic head and expected database revision;
+- names of changed configuration keys and non-secret flag values only;
+- successful backend/frontend CI run IDs for the exact release commits;
+- staging or equivalent pre-production smoke evidence and reviewer;
+- migration approval ID when the database revision changes;
+- production deployment approval ID, release operator, incident owner, and
+  rollback owner;
+- post-release `/ready`, `/health`, queue-consumer, running-image-revision, and
+  migration-revision evidence.
 
-1. Confirm staging has distinct database, Redis, Meta resources, and secrets;
-   retain the evidence required by `WHATSAPP_STAGING_SAFETY.md`.
-2. Pin the recorded commit and configuration manifest; keep `MIGRATION_MODE=dual`.
-3. Verify a recoverable staging backup and record its restore owner and time.
-4. Set the expected staging Alembic revision and approval ID for this release.
-   Run only the manual `release-migration.yml` migration actor. It must report the
-   expected current revision and one repository head before upgrade.
-5. Roll out web. Require `GET /ready` to return 200, then verify `/health` and
-   the staging smoke checklist. The readiness payload must contain no secrets.
-6. Roll out the worker separately only after web readiness passes. Verify an
-   active consumer and durable queue state through `/health`.
-7. Rehearse and record: rollback the staged worker to the pinned release, and
-   roll back an additive schema release by reverting application code while
-   retaining the schema (or exercise its documented forward-fix path).
-8. A reviewer signs staging evidence. Production cannot start without separate
-   production deployment approval and, if a revision changes, migration approval.
+Never copy secret values, access tokens, connection strings, private keys, or
+customer content into a release record or workflow summary. GitHub production
+environment protection must require an explicit reviewer approval. If that
+protection is absent, the workflow trigger is not production authorization.
 
-## Production promotion
+## Migration and compatibility gate
 
-1. Reconfirm the same commit/image/config manifest used in staging and the
-   expected production revision. Do not promote a rebuilt or unpinned artifact.
-2. Confirm fresh production backup/recovery evidence and assign the incident
-   owner. Record approval IDs; do not put any secret value in the release record.
-3. Run only the manual `release-migration.yml` workflow. It is the sole
-   migration actor and must pass revision, backup, approval, and advisory lock
-   checks. If it reports an unknown or unexpected revision, stop. Then manually
-   deploy only the web release.
-4. Confirm `/ready` (200) and `/health` before separately deploying the worker.
-   No worker deploy or manual Alembic command may race the migration actor.
-5. Record post-release health, queue consumer count, commit/image IDs, actual
-   revision, and approval outcome. Production remains in backward-compatible
-   `dual` mode.
+Every schema change follows expand -> backfill -> contract across separately
+deployable releases. A contract or destructive-risk migration must not remove
+the rollback window for the currently running API or worker. Applied revisions
+are never edited. Prefer a reviewed forward fix; use downgrade or restore only
+when that exact recovery path has been tested and approved.
 
-## Stop and rollback
+Only `.github/workflows/release-migration.yml` may apply a release migration.
+It checks out the reviewed full commit SHA, proves that SHA belongs to `main`
+and has a successful push-triggered Backend CI run, requires the expected
+current and target revisions, verified backup/recovery evidence, an approval
+identifier, and a PostgreSQL advisory lock. The migration actor validates the
+database revision again after Alembic completes. Web and worker startup and the
+Azure deployment scripts never run migrations.
 
-Stop before production for missing staging evidence, a material environment
-difference, unknown revision, failed recovery verification, incompatible
-web/worker release, or missing approval. Do not continue by disabling checks.
+Before application rollout, record a compatibility decision for the current
+database revision, candidate API, previous worker, and candidate worker. The
+backend Azure script replaces and verifies the API first while the previous
+worker remains active, then replaces and verifies the worker from the same
+immutable backend image. A readiness, revision, or queue-consumer failure
+causes verified application rollback.
 
-For a release incident: disable outbound WhatsApp through the approved
-configuration control, preserve inbound events, durable queue data, and
-unresolved outbound intents, roll web and worker back separately to the pinned
-compatible release, and verify health.
-Keep additive schema changes in place; use an approved forward-fix migration.
-Only an incident-controlled, tested restore may use a verified backup. Resume
-outbound traffic only after the incident owner, migration approver (if relevant),
-and deployment approver record recovery evidence.
+## Pre-production evidence
+
+Use an isolated staging environment when it is available. If production-like
+rehearsal is performed by another approved mechanism, record why it is
+equivalent and every material difference. It must never share a production
+database, Redis namespace, WhatsApp credentials, or outbound destination.
+
+1. Pin the release commits, images, Compose digest, and non-secret config
+   manifest; keep `MIGRATION_MODE=dual`.
+2. Verify a recoverable backup and record the restore owner and timestamp.
+3. If a revision changes, run only the approval-gated migration actor and
+   capture its preflight and post-validation output.
+4. Verify `/ready`, `/health`, one active queue consumer, inbound webhook queue
+   durability, and outbound-disabled smoke tests.
+5. Rehearse a worker rollback to the pinned compatible image.
+6. Rehearse an additive-schema application rollback that retains the schema,
+   or the documented forward-fix recovery path.
+7. Obtain reviewer sign-off. Missing evidence is a production stop condition,
+   not permission to weaken a check.
+
+## Azure production promotion
+
+1. Reconfirm the exact CI-tested commits and immutable image references. A
+   rebuilt, branch-only, abbreviated, or non-main SHA is not releasable.
+2. Reconfirm backup/recovery evidence, expected Alembic revision, release
+   record, rollback owner, and production approval. Run the migration workflow
+   first only when the reviewed release changes the revision.
+3. Confirm the migration actor reports the expected post-migration revision.
+   Stop on an unknown revision, multiple Alembic heads, or failed validation.
+4. Approve the protected Azure production deployment. Backend and frontend
+   workflows share the existing VPS lock and deploy only the selected component.
+5. For backend, confirm candidate API readiness before the worker changes, then
+   confirm the candidate worker revision, `/ready`, `/health`, and consumer
+   count. For frontend, confirm its revision and local health response.
+6. Attach workflow summaries and health evidence to the release record. Keep
+   production in backward-compatible `dual` mode unless a separate phase and
+   approval explicitly authorize a cutover.
+
+## Stop and recover
+
+Stop for missing review evidence, an unexpected commit or image, unknown
+migration state, incompatible API/worker/schema versions, failed readiness,
+missing queue consumer, material pre-production differences, or absent backup
+and approval records. Do not continue by disabling checks.
+
+For an incident, disable outbound WhatsApp using the approved kill switch while
+preserving inbound events, durable queue data, and unresolved outbox intents.
+The Azure deployment script restores the preceding image descriptor and verifies
+container revisions and health. Keep additive schema changes in place and use a
+reviewed forward fix. Restore a database only from verified backup under
+incident control. Resume outbound traffic only after the incident, migration
+(when relevant), and deployment approvers record successful recovery evidence.

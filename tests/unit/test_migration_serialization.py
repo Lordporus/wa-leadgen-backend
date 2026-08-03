@@ -1,11 +1,12 @@
 from contextlib import nullcontext
+from typing import Any
 from unittest.mock import MagicMock
 
 from scripts import run_migrations
 
 
 def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
-    events = []
+    events: list[tuple[Any, ...]] = []
     connection = MagicMock()
     def execute(statement, params=None):
         events.append((str(statement), params))
@@ -38,9 +39,10 @@ def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
     )
 
     assert "pg_advisory_xact_lock" in events[0][0]
-    assert events[-1][0] == "alembic"
-    assert events[-1][1] is connection
-    assert events[-1][2] == "0021"
+    assert events[-2][0] == "alembic"
+    assert events[-2][1] is connection
+    assert events[-2][2] == "0021"
+    assert "SELECT version_num FROM alembic_version" in events[-1][0]
     engine.dispose.assert_called_once_with()
 
 

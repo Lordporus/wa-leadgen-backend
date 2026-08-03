@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -11,6 +12,9 @@ from slowapi.errors import RateLimitExceeded
 
 from app.api.routers import health
 from scripts import run_migrations
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_migration_actor_requires_explicit_release_gates():
@@ -71,6 +75,98 @@ def test_migration_actor_rejects_an_unexpected_target_revision(monkeypatch):
         )
 
     upgrade.assert_not_called()
+
+
+def test_migration_actor_fails_when_post_validation_does_not_reach_head(monkeypatch):
+    connection = MagicMock()
+    first_result = MagicMock()
+    first_result.scalar_one_or_none.return_value = "0020"
+    second_result = MagicMock()
+    second_result.scalar_one_or_none.return_value = "0020"
+    connection.execute.side_effect = [MagicMock(), first_result, second_result]
+    engine = MagicMock()
+    engine.begin.return_value = nullcontext(connection)
+    monkeypatch.setattr(run_migrations, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(run_migrations, "_configured_head", lambda _: "0021")
+    monkeypatch.setattr(run_migrations.command, "upgrade", MagicMock())
+
+    with pytest.raises(RuntimeError, match="post-validation failed"):
+        run_migrations.run_migrations(
+            "postgresql://offline/never",
+            expected_current_revision="0020",
+            expected_target_revision="0021",
+            backup_verified=True,
+            approval_id="APR-2",
+        )
+
+
+def test_azure_release_workflow_pins_approved_ci_commit_without_topology_change():
+    workflow = (REPOSITORY_ROOT / ".github/workflows/deploy-azure.yml").read_text()
+
+    assert "DEPLOY_ROOT: /opt/qualify/backend" in workflow
+    assert "environment: production" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "git merge-base --is-ancestor \"$TARGET_SHA\" origin/main" in workflow
+    assert "Target SHA has no successful Backend CI push run" in workflow
+    assert "ref: ${{ steps.target.outputs.sha }}" in workflow
+    assert "StrictHostKeyChecking=yes" in workflow
+    assert "Compose SHA-256" in workflow
+    assert "/usr/local/sbin/qualify-deploy-azure backend" in workflow
+    assert "scp " not in workflow
+    assert "'$compose_digest'" in workflow
+
+
+def test_migration_workflow_pins_main_commit_and_records_revision_manifest():
+    workflow = (REPOSITORY_ROOT / ".github/workflows/release-migration.yml").read_text()
+
+    assert "commit_sha:" in workflow
+    assert "ref: ${{ inputs.commit_sha }}" in workflow
+    assert "git merge-base --is-ancestor \"$TARGET_SHA\" origin/main" in workflow
+    assert "Target SHA has no successful Backend CI push run" in workflow
+    assert "expected_current_revision" in workflow
+    assert "expected_target_revision" in workflow
+    assert "backup_verified" in workflow
+    assert "approval_id" in workflow
+    assert "Record non-secret migration release manifest" in workflow
+
+
+def test_azure_backend_rollout_orders_api_before_worker_and_never_migrates():
+    script = (REPOSITORY_ROOT / "scripts/deploy-azure.sh").read_text()
+
+    api_rollout = 'compose up -d --no-deps api'
+    compatibility = "verify_api_compatibility"
+    worker_rollout = 'compose up -d --no-deps worker'
+    assert script.index(api_rollout) < script.rindex(compatibility) < script.index(worker_rollout)
+    assert "ghcr.io/lordporus/wa-leadgen-backend:$commit_sha" in script
+    assert "image reference does not match the component and commit SHA" in script
+    assert "readonly DEPLOY_ROOT='/opt/qualify/backend'" in script
+    assert "readonly BACKEND_ENV='/etc/qualify/backend.env'" in script
+    assert "readonly FRONTEND_ENV='/etc/qualify/frontend.env'" in script
+    assert "qualify-step5-compose.override.yml" not in script
+    assert "rehearsal-backend.env" not in script
+    assert "set_deployment_image \"$key\" \"$image\"" in script
+    assert "readonly DEPLOY_LOCK='/var/lock/qualify-production-deploy.lock'" in script
+    assert "live production Compose file does not match the reviewed backend commit" in script
+    assert "write_deployment_images" in script
+    assert "alembic upgrade" not in script
+    assert "run_migrations.py" not in script
+
+
+def test_phase11_runbook_requires_manifest_approvals_and_recovery_evidence():
+    runbook = (REPOSITORY_ROOT / "docs/PHASE11_RELEASE_RUNBOOK.md").read_text()
+
+    for required in (
+        "SHA-256 of `deploy/docker-compose.production.yml`",
+        "expected database revision",
+        "staging or equivalent pre-production smoke evidence",
+        "production deployment approval ID",
+        "rollback owner",
+        "post-release `/ready`",
+        "worker rollback",
+        "additive-schema application rollback",
+    ):
+        assert required in runbook
+    assert "Render service/image IDs" not in runbook
 
 
 def test_readiness_is_secret_free_and_requires_required_configuration(monkeypatch):
