@@ -24,6 +24,7 @@ from app.api.routers import (
     leads,
     settings,
     whatsapp as whatsapp_routes,
+    whatsapp_operations as whatsapp_operations_routes,
     whatsapp_policy as whatsapp_policy_routes,
     whatsapp_sequences as whatsapp_sequences_routes,
 )
@@ -227,6 +228,8 @@ app.include_router(documents.router)
 app.include_router(billing.router)
 app.include_router(health.router)
 app.include_router(whatsapp_routes.router)
+app.include_router(whatsapp_operations_routes.tenant_router)
+app.include_router(whatsapp_operations_routes.admin_router)
 app.include_router(whatsapp_policy_routes.router)
 app.include_router(whatsapp_sequences_routes.router)
 app.include_router(analytics.router)

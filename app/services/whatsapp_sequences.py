@@ -409,6 +409,11 @@ def _claim_due_enrollment(now: datetime) -> int | None:
             .one_or_none()
         )
         if existing is not None:
+            if existing.state == "paused":
+                existing.state = "sending"
+                existing.completed_at = None
+                session.commit()
+                return existing.id
             # Another worker owns this durable claim. It must not alter the
             # enrollment or emit a second provider call.
             return None
@@ -440,8 +445,19 @@ def _final_sequence_guard(
         .with_for_update()
         .one_or_none()
     )
+
     if enrollment is None or sequence is None:
         return "enrollment_inactive"
+    from app.services import whatsapp_operations
+
+    if not whatsapp_operations.enabled_locked(
+        session,
+        whatsapp_operations.SEQUENCE,
+        client_id=client.id,
+        resource_id=sequence.id,
+        lock=True,
+    ):
+        return "operational_sequence_paused"
     if enrollment.status != "active":
         return enrollment.stop_reason or "enrollment_inactive"
     if sequence.status != "active":
@@ -466,12 +482,27 @@ def _process_claim(execution_id: int, now: datetime) -> str:
             .with_for_update()
             .one()
         )
+
         sequence = (
             session.query(WhatsAppSequence)
             .filter_by(id=enrollment.sequence_id, client_id=enrollment.client_id)
             .with_for_update()
             .one()
         )
+        from app.services import whatsapp_operations
+
+        if not whatsapp_operations.enabled_locked(
+            session,
+            whatsapp_operations.SEQUENCE,
+            client_id=enrollment.client_id,
+            resource_id=sequence.id,
+            lock=True,
+        ):
+            enrollment.next_run_at = now + _RETRY_DELAY
+            execution.state = "paused"
+            execution.completed_at = now
+            session.commit()
+            return "paused"
         lead = (
             session.query(Lead)
             .filter_by(id=enrollment.lead_id, client_id=enrollment.client_id)
@@ -609,7 +640,15 @@ def _process_claim(execution_id: int, now: datetime) -> str:
         enrollment.last_run_at = now
         execution.completed_at = now
         if result.state != "sent":
-            execution.state = "blocked"
+            temporary_control_block = result.reason_code in {
+                "global_operational_control",
+                "tenant_operational_control",
+                "template_disabled",
+                "operational_sequence_paused",
+            }
+            execution.state = (
+                "paused" if temporary_control_block else "blocked"
+            )
             if result.reason_code in {
                 "opted_out",
                 "human_takeover",

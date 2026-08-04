@@ -21,13 +21,15 @@ from app.core.models import (
     Message,
     WhatsAppConsentRecord,
     WhatsAppOptOut,
+    WhatsAppOperationalControl,
+    WhatsAppOperationalControlAudit,
     WhatsAppOutboundIntent,
     WhatsAppPolicyDecision,
     WhatsAppTemplate,
     WhatsAppTenantPolicy,
     WhatsAppWebhookEvent,
 )
-from app.services import whatsapp_outbox, whatsapp_policy
+from app.services import whatsapp_operations, whatsapp_outbox, whatsapp_policy
 
 pytestmark = pytest.mark.integration
 
@@ -39,6 +41,8 @@ _TABLES = [
     Message.__table__,
     WhatsAppConsentRecord.__table__,
     WhatsAppOptOut.__table__,
+    WhatsAppOperationalControl.__table__,
+    WhatsAppOperationalControlAudit.__table__,
     WhatsAppTenantPolicy.__table__,
     WhatsAppTemplate.__table__,
     WhatsAppPolicyDecision.__table__,
@@ -144,6 +148,49 @@ def _seed(factory):
         )
         session.add(inbound)
         session.flush()
+        for control_key, control_type, correlation_id in (
+            (
+                "global:global_outbound",
+                whatsapp_operations.GLOBAL_OUTBOUND,
+                "00000000-0000-4000-8000-000000000022",
+            ),
+            (
+                "global:worker_consumption",
+                whatsapp_operations.WORKER_CONSUMPTION,
+                "00000000-0000-4000-8000-000000000023",
+            ),
+        ):
+            control = WhatsAppOperationalControl(
+                control_key=control_key,
+                scope="global",
+                client_id=None,
+                control_type=control_type,
+                resource_id=None,
+                enabled=True,
+                version=1,
+                updated_by="system:migration:0022",
+                reason="phase12a_bootstrap_enabled",
+                correlation_id=correlation_id,
+            )
+            session.add(control)
+            session.flush()
+            session.add(
+                WhatsAppOperationalControlAudit(
+                    control_id=control.id,
+                    control_key=control_key,
+                    scope="global",
+                    client_id=None,
+                    control_type=control_type,
+                    resource_id=None,
+                    from_enabled=None,
+                    to_enabled=True,
+                    from_version=0,
+                    to_version=1,
+                    operator_id="system:migration:0022",
+                    reason="phase12a_bootstrap_enabled",
+                    correlation_id=correlation_id,
+                )
+            )
         session.add(
             WhatsAppOutboundIntent(
                 id=1,
@@ -283,4 +330,101 @@ def test_queued_send_waits_while_opt_out_transaction_is_committing(
     assert dispatch_results[0].state == "blocked"
     with factory() as session:
         assert session.query(WhatsAppOptOut).count() == 1
+        assert session.get(WhatsAppOutboundIntent, 1).state == "blocked"
+
+def test_first_global_disable_serializes_with_final_send(
+    postgres_policy_db,
+):
+    factory = postgres_policy_db
+    disable_flushed = Event()
+    release_disable = Event()
+    disable_committed = Event()
+    errors: list[Exception] = []
+    provider_calls: list[ProviderCall] = []
+    dispatch_results: list[whatsapp_outbox.DispatchResult] = []
+    mutation_results: list[whatsapp_operations.ControlState] = []
+
+    with factory() as session:
+        initial = session.query(WhatsAppOperationalControl).filter_by(
+            control_key="global:global_outbound"
+        ).one()
+        assert initial.enabled is True
+        assert initial.version == 1
+        assert session.query(WhatsAppOperationalControlAudit).filter_by(
+            control_id=initial.id
+        ).count() == 1
+
+    def pause_disable_after_flush(session, _context):
+        disabling = any(
+            isinstance(row, WhatsAppOperationalControl)
+            and row.control_key == "global:global_outbound"
+            and row.enabled is False
+            for row in session.dirty
+        )
+        if disabling:
+            disable_flushed.set()
+            assert release_disable.wait(10)
+
+    def disable_global_outbound() -> None:
+        try:
+            mutation_results.append(
+                whatsapp_operations.mutate(
+                    control=whatsapp_operations.GLOBAL_OUTBOUND,
+                    enabled_value=False,
+                    expected_version=1,
+                    operator_id="admin:1:authenticated-session",
+                    reason="postgres serialization regression",
+                    correlation_id=str(uuid4()),
+                )
+            )
+            disable_committed.set()
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    event.listen(factory.class_, "after_flush", pause_disable_after_flush)
+    disable_thread = Thread(target=disable_global_outbound)
+    dispatch_thread = Thread(
+        target=_dispatch,
+        args=(provider_calls, dispatch_results, errors),
+    )
+    try:
+        disable_thread.start()
+        assert disable_flushed.wait(5)
+        dispatch_thread.start()
+
+        deadline = time.monotonic() + 5
+        state = None
+        while time.monotonic() < deadline:
+            with factory() as session:
+                state = session.get(WhatsAppOutboundIntent, 1).state
+            if state == "sending":
+                break
+            time.sleep(0.01)
+        assert state == "sending"
+        assert provider_calls == []
+        assert not disable_committed.is_set()
+
+        release_disable.set()
+        disable_thread.join(10)
+        dispatch_thread.join(10)
+    finally:
+        release_disable.set()
+        event.remove(factory.class_, "after_flush", pause_disable_after_flush)
+
+    assert not disable_thread.is_alive()
+    assert not dispatch_thread.is_alive()
+    assert errors == []
+    assert disable_committed.is_set()
+    assert mutation_results[0].version == 2
+    assert provider_calls == []
+    assert dispatch_results[0].state == "blocked"
+    with factory() as session:
+        control = session.query(WhatsAppOperationalControl).filter_by(
+            control_key="global:global_outbound"
+        ).one()
+        assert control.enabled is False
+        assert control.version == 2
+        assert session.query(WhatsAppOperationalControlAudit).filter_by(
+            control_id=control.id
+        ).count() == 2
         assert session.get(WhatsAppOutboundIntent, 1).state == "blocked"

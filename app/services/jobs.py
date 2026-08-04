@@ -151,6 +151,41 @@ def process_webhook_message(
         logger.info("Durable WhatsApp opt-out recorded; automated reply suppressed")
         return
 
+    from app.services import whatsapp_operations
+
+    if not whatsapp_operations.enabled(
+        whatsapp_operations.AI_AUTO_REPLY,
+        client_id=current_client_id,
+    ):
+        durable_control_lead = None
+        if database.SessionLocal is not None:
+            with database.SessionLocal() as session:
+                durable_control_lead = session.query(Lead).filter_by(
+                    client_id=current_client_id,
+                    phone=sender_phone,
+                ).one_or_none()
+        if durable_control_lead is not None:
+            whatsapp_inbox.transition_takeover(
+                client_id=current_client_id,
+                lead_id=durable_control_lead.id,
+                enabled=True,
+                expected_version=None,
+                operator_id="system:ai-operational-control",
+                reason="ai_auto_reply_disabled",
+                correlation_id=correlation_id or str(msg_id),
+                confirmed=True,
+            )
+            store.update_human_takeover_by_id(
+                lead["id"],
+                True,
+                client_id=current_client_id,
+            )
+        logger.info(
+            "WhatsApp AI reply suppressed by tenant operational control"
+        )
+        return
+
+
     preflight = whatsapp_policy.preflight_text(
         client_id=current_client_id,
         phone=sender_phone,
