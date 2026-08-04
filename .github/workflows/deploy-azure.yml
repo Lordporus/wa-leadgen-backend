@@ -34,6 +34,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: production
     steps:
       - name: Resolve immutable main commit
         id: target
@@ -89,7 +90,7 @@ jobs:
       - uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: ${{ secrets.AZURE_VPS_SSH_PRIVATE_KEY }}
-      - name: Stage deployment files and deploy
+      - name: Deploy reviewed backend image
         env:
           HOST: ${{ secrets.AZURE_VPS_HOST }}
           USER: ${{ secrets.AZURE_VPS_USER }}
@@ -101,10 +102,22 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          ssh "${ssh_options[@]}" "$USER@$HOST" "mkdir -p '$DEPLOY_ROOT/deploy'"
-          scp "${ssh_options[@]}" -r deploy/. "$USER@$HOST:$DEPLOY_ROOT/deploy/"
+          compose_digest="$(sha256sum deploy/docker-compose.production.yml | cut -d' ' -f1)"
           {
             printf '%s\n' "$GHCR_USERNAME"
             printf '%s' "$GHCR_READ_TOKEN"
           } | ssh "${ssh_options[@]}" "$USER@$HOST" \
-            "sudo -n /usr/local/sbin/qualify-deploy-azure backend '$IMAGE:${{ steps.target.outputs.sha }}' '${{ steps.target.outputs.sha }}'"
+            "sudo -n /usr/local/sbin/qualify-deploy-azure backend '$IMAGE:${{ steps.target.outputs.sha }}' '${{ steps.target.outputs.sha }}' '$compose_digest'"
+      - name: Record non-secret release manifest
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          compose_digest="$(sha256sum deploy/docker-compose.production.yml | cut -d' ' -f1)"
+          {
+            echo "### Azure backend release"
+            echo "- Commit: \`$TARGET_SHA\`"
+            echo "- Image: \`$IMAGE:$TARGET_SHA\`"
+            echo "- Compose SHA-256: \`$compose_digest\`"
+            echo "- Migration actor: separate approval-gated workflow"
+            echo "- Deployment environment: production"
+          } >> "$GITHUB_STEP_SUMMARY"

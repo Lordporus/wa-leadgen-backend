@@ -8,6 +8,10 @@ on:
         required: true
         type: choice
         options: [staging, production]
+      commit_sha:
+        description: Full reviewed commit SHA from main containing this migration
+        required: true
+        type: string
       expected_current_revision:
         description: Exact Alembic revision expected before this release
         required: true
@@ -26,6 +30,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -41,7 +46,32 @@ jobs:
       APP_ENV: ci
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
     steps:
+      - name: Validate immutable release commit
+        shell: bash
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::A full lowercase commit SHA is required"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+      - name: Require release commit and successful Backend CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          successful_runs="$(gh run list \
+            --workflow ci.yml \
+            --commit "$TARGET_SHA" \
+            --event push \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq 'length')"
+          [[ "$successful_runs" == "1" ]] || { echo "::error::Target SHA has no successful Backend CI push run"; exit 1; }
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11.9"
@@ -60,3 +90,19 @@ jobs:
             --expected-target-revision "$EXPECTED_TARGET_REVISION" \
             --backup-verified \
             --approval-id "$APPROVAL_ID"
+      - name: Record non-secret migration release manifest
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          EXPECTED_CURRENT_REVISION: ${{ inputs.expected_current_revision }}
+          EXPECTED_TARGET_REVISION: ${{ inputs.expected_target_revision }}
+          APPROVAL_ID: ${{ inputs.approval_id }}
+        run: |
+          {
+            echo "### Approved migration release"
+            echo "- Commit: \`$TARGET_SHA\`"
+            echo "- Environment: \`$ENVIRONMENT\`"
+            echo "- Expected revision: \`$EXPECTED_CURRENT_REVISION\`"
+            echo "- Validated target revision: \`$EXPECTED_TARGET_REVISION\`"
+            echo "- Approval: \`$APPROVAL_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -77,7 +77,18 @@ def run_migrations(
             )
             alembic_config.attributes["connection"] = connection
             command.upgrade(alembic_config, head)
-            print("Alembic migration gate completed.", flush=True)
+            applied_revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one_or_none()
+            if applied_revision != head:
+                raise RuntimeError(
+                    "migration post-validation failed: expected revision "
+                    f"{head!r}, found {applied_revision!r}"
+                )
+            print(
+                f"Alembic migration gate completed and validated at {applied_revision}.",
+                flush=True,
+            )
     finally:
         engine.dispose()
 
