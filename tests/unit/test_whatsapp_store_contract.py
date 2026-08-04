@@ -11,12 +11,18 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.clients.airtable_client import AirtableClient
-from app.services import jobs
 from app.core.database import Base
 from app.core.models import Client, Lead
+from app.services import jobs
+from app.services import whatsapp_operations
 from app.store.db_client import DatabaseClient
 from app.store.store import DualWriteStore
 from app.store.webhook_store import WebhookStore
+
+
+@pytest.fixture(autouse=True)
+def _enabled_operational_controls(monkeypatch):
+    monkeypatch.setattr(whatsapp_operations, "enabled", lambda *_a, **_k: True)
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]

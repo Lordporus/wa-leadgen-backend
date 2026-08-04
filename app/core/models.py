@@ -523,6 +523,76 @@ class WhatsAppTakeoverTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class WhatsAppOperationalControl(Base):
+    """Current fail-closed state for one versioned WhatsApp runtime control."""
+
+    __tablename__ = "whatsapp_operational_controls"
+    __table_args__ = (
+        UniqueConstraint("control_key", name="uq_whatsapp_operational_control_key"),
+        CheckConstraint("version >= 1", name="ck_whatsapp_operational_control_version"),
+        Index("idx_whatsapp_operational_control_tenant", "client_id", "control_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    control_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="RESTRICT"), nullable=True
+    )
+    control_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class WhatsAppOperationalControlAudit(Base):
+    """Append-only record of one operational-control transition."""
+
+    __tablename__ = "whatsapp_operational_control_audits"
+    __table_args__ = (
+        UniqueConstraint(
+            "control_id", "to_version",
+            name="uq_whatsapp_operational_control_audit_version",
+        ),
+        UniqueConstraint(
+            "correlation_id",
+            name="uq_whatsapp_operational_control_audit_correlation",
+        ),
+        Index(
+            "idx_whatsapp_operational_control_audit_tenant_time",
+            "client_id", "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    control_id: Mapped[int] = mapped_column(
+        ForeignKey("whatsapp_operational_controls.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    control_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clients.id", ondelete="RESTRICT"), nullable=True
+    )
+    control_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    from_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    to_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    from_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    to_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operator_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class WhatsAppConsentRecord(Base):
     """Current tenant-scoped proof of WhatsApp consent for one phone."""
 

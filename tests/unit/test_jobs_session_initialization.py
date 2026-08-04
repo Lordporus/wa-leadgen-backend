@@ -4,12 +4,14 @@ from types import SimpleNamespace
 from app.core import database
 from app.core.models import Client
 from app.services import jobs
+from app.services import whatsapp_operations
 
 
 def test_inbound_fallback_uses_session_factory_initialized_after_jobs_import(
     monkeypatch,
     tmp_path,
 ):
+    monkeypatch.setattr(whatsapp_operations, "enabled", lambda *_a, **_k: True)
     monkeypatch.setattr(database, "engine", None)
     monkeypatch.setattr(database, "SessionLocal", None)
     assert not database.is_configured()

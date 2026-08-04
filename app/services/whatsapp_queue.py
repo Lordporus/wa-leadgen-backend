@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -131,6 +131,27 @@ def process_webhook_event(envelope: dict[str, Any]) -> None:
         raise PermanentWebhookError("Invalid WhatsApp job envelope")
     if not isinstance(tenant_id, int) or not isinstance(phone_number_id, str) or not isinstance(payload, dict):
         raise PermanentWebhookError("Incomplete WhatsApp job envelope")
+
+    from app.services import whatsapp_operations
+
+    if not whatsapp_operations.enabled(
+        whatsapp_operations.WORKER_CONSUMPTION
+    ):
+        if webhook_queue is None:
+            raise RuntimeError("WhatsApp queue is unavailable while paused")
+        webhook_queue.enqueue_in(
+            timedelta(seconds=10),
+            process_webhook_event,
+            envelope,
+            job_timeout=WHATSAPP_RQ_JOB_TIMEOUT,
+            retry=Retry(
+                max=WHATSAPP_RQ_MAX_RETRIES,
+                interval=list(WHATSAPP_RQ_RETRY_INTERVALS),
+            ),
+            meta={"whatsapp_initial_retries": WHATSAPP_RQ_MAX_RETRIES},
+        )
+        return
+
 
     retry_attempt = _retry_attempt(envelope)
     _mark_state(

@@ -6,6 +6,13 @@ from requests.exceptions import ConnectionError as RequestsConnectionError, HTTP
 
 from app.services import jobs
 from app.services import whatsapp_queue
+from app.services import whatsapp_operations
+
+
+@pytest.fixture(autouse=True)
+def _enabled_worker_control(monkeypatch):
+    monkeypatch.setattr(whatsapp_operations, "enabled", lambda *_a, **_k: True)
+
 
 
 def _envelope(kind="message"):

@@ -14,7 +14,14 @@ import pytest
 import main as application
 from app.api.routers import whatsapp as legacy_whatsapp
 from app.services import jobs
+from app.services import whatsapp_operations
 from scripts import send_initial_outreach
+
+
+@pytest.fixture(autouse=True)
+def _enabled_ai_control(monkeypatch):
+    monkeypatch.setattr(whatsapp_operations, "enabled", lambda *_a, **_k: True)
+
 
 
 @contextmanager

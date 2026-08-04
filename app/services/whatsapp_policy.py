@@ -496,10 +496,37 @@ def evaluate_locked(
 
     reason = "allowed"
     allowed = True
+    from app.services import whatsapp_operations
+
     if not config.WHATSAPP_OUTBOUND_ENABLED:
         allowed, reason = False, "global_kill_switch"
+    elif not whatsapp_operations.enabled_locked(
+        session,
+        whatsapp_operations.GLOBAL_OUTBOUND,
+        lock=True,
+    ):
+        allowed, reason = False, "global_operational_control"
     elif not client.is_active or not active_policy.outbound_enabled:
         allowed, reason = False, "tenant_kill_switch"
+    elif not whatsapp_operations.enabled_locked(
+        session,
+        whatsapp_operations.TENANT_OUTBOUND,
+        client_id=client.id,
+        lock=True,
+    ):
+        allowed, reason = False, "tenant_operational_control"
+    elif (
+        message_type == "template"
+        and template is not None
+        and not whatsapp_operations.enabled_locked(
+            session,
+            whatsapp_operations.TEMPLATE,
+            client_id=client.id,
+            resource_id=template.id,
+            lock=True,
+        )
+    ):
+        allowed, reason = False, "template_disabled"
     elif (
         lead is not None
         and not allow_human_takeover

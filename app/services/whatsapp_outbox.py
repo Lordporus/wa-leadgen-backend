@@ -193,6 +193,32 @@ def dispatch_intent(
             ).with_for_update().one_or_none()
             if lead is None:
                 raise OutboundIntentError("Outbound recipient is not a tenant lead")
+            if intent.intent_kind == "ai_reply":
+                from app.services import whatsapp_operations
+
+                if not whatsapp_operations.enabled_locked(
+                    session,
+                    whatsapp_operations.AI_AUTO_REPLY,
+                    client_id=client_id,
+                    lock=True,
+                ):
+                    _mark_blocked_locked(
+                        session,
+                        intent,
+                        category="ai_auto_reply_disabled",
+                        reason="Tenant AI auto-reply operational control is disabled",
+                    )
+                    from app.services import ai_decision
+
+                    ai_decision.mark_audit_outcome_locked(
+                        session,
+                        audit_id=intent.ai_decision_audit_id,
+                        client_id=client_id,
+                        outcome="blocked",
+                        reason="ai_auto_reply_disabled",
+                    )
+                    session.commit()
+                    return DispatchResult("blocked")
             if intent.takeover_version is None or intent.takeover_version != lead.takeover_version:
                 _mark_blocked_locked(
                     session, intent, category="stale_takeover_version",
