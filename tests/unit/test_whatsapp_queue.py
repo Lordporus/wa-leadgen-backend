@@ -224,50 +224,6 @@ def test_processing_persists_actual_rq_retry_attempt(monkeypatch):
     assert calls[0][1]["retry_attempt"] == 2
 
 
-def test_replay_only_requeues_a_dead_letter_receipt(monkeypatch):
-    receipt = SimpleNamespace(
-        state="dead_letter",
-        event_kind="message",
-        payload=_envelope()["payload"],
-        phone_number_id="phone-id",
-        client_id=7,
-    )
-
-    class Session:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def get(self, _model, receipt_id):
-            assert receipt_id == 10
-            return receipt
-
-    replayed = []
-
-    def fake_enqueue(**kwargs):
-        replayed.append(kwargs)
-        return "cid-replayed"
-
-    monkeypatch.setattr(whatsapp_queue.database, "SessionLocal", Session)
-    monkeypatch.setattr(whatsapp_queue, "enqueue_event", fake_enqueue)
-
-    assert whatsapp_queue.replay_dead_letter(receipt_id=10) == "cid-replayed"
-    assert replayed == [{"kind": "message", "payload": _envelope()["payload"], "phone_number_id": "phone-id", "client_id": 7}]
-
-
-def test_replay_rejects_non_dead_letter_receipt(monkeypatch):
-    class Session:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def get(self, *_):
-            return SimpleNamespace(state="processed")
-
-    monkeypatch.setattr(whatsapp_queue.database, "SessionLocal", Session)
-    with pytest.raises(ValueError, match="Only dead-lettered"):
+def test_legacy_direct_replay_path_is_disabled():
+    with pytest.raises(RuntimeError, match="protected tenant API"):
         whatsapp_queue.replay_dead_letter(receipt_id=10)
