@@ -12,6 +12,7 @@ from app.services import whatsapp_operations
 @pytest.fixture(autouse=True)
 def _enabled_worker_control(monkeypatch):
     monkeypatch.setattr(whatsapp_operations, "enabled", lambda *_a, **_k: True)
+    monkeypatch.setattr(whatsapp_queue, "_restore_durable_correlation", lambda envelope: dict(envelope))
 
 
 
@@ -143,7 +144,7 @@ def test_worker_routes_status_events_through_same_durable_worker(monkeypatch):
 
     assert calls == [(
         ({"id": "wamid.phase5", "status": "read"},),
-        {"current_client_id": 7, "phone_number_id": "phone-id", "require_known_intent": True},
+        {"current_client_id": 7, "phone_number_id": "phone-id", "require_known_intent": True, "correlation_id": "cid-1"},
     )]
 
 

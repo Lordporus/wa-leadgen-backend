@@ -605,6 +605,11 @@ def test_worker_pause_defers_without_processing_or_losing_receipt(monkeypatch):
         "enabled",
         lambda *_args, **_kwargs: False,
     )
+    monkeypatch.setattr(
+        whatsapp_queue,
+        "_restore_durable_correlation",
+        lambda envelope: dict(envelope),
+    )
     monkeypatch.setattr(whatsapp_queue, "webhook_queue", Queue())
     monkeypatch.setattr(
         whatsapp_queue,

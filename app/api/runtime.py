@@ -12,9 +12,11 @@ from app.core.config import (
     SENTRY_ENVIRONMENT,
     SENTRY_TRACES_SAMPLE_RATE,
 )
+from app.services.whatsapp_observability import configure_whatsapp_logging
 from app.store.store import get_store
 
 logging.basicConfig(level=logging.INFO)
+configure_whatsapp_logging()
 logger = logging.getLogger("main")
 
 # Initialize observability before provider clients, matching the previous

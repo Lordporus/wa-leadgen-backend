@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+from time import perf_counter
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
@@ -84,7 +85,7 @@ def _process_analytics_and_extraction_bg(
             client_id=current_client_id,
         )
     except Exception as e:
-        logger.error(f"Lead scoring failed in background: {e}")
+        logger.error("background_lead_scoring_failed", extra={"error_type": type(e).__name__})
 
     # 2. Information Extraction (Independent Try/Except)
     try:
@@ -97,7 +98,7 @@ def _process_analytics_and_extraction_bg(
                 client_id=current_client_id,
             )
     except Exception as e:
-        logger.error(f"Lead info extraction failed in background: {e}")
+        logger.error("background_lead_extraction_failed", extra={"error_type": type(e).__name__})
 
     # 3. Status Updates (Independent Try/Except)
     try:
@@ -117,7 +118,7 @@ def _process_analytics_and_extraction_bg(
                 )
                 logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
     except Exception as e:
-        logger.error(f"Status update failed in background: {e}")
+        logger.error("background_status_update_failed", extra={"error_type": type(e).__name__})
 
     # 4. Lord Notification (Executed last, constraint #4)
     try:
@@ -141,7 +142,7 @@ def _process_analytics_and_extraction_bg(
                     "Legacy hot-lead alert suppressed: tenant operator template is not configured"
                 )
     except Exception as e:
-        logger.error(f"Lord notification failed in background: {e}")
+        logger.error("background_operator_notification_failed", extra={"error_type": type(e).__name__})
 
 @router.post("/webhook")
 @limiter.limit("1000/minute")
@@ -151,6 +152,9 @@ async def receive_message(request: Request, response: Response):
     Fast-ACK: HMAC verify → dedup → enqueue RQ job → return 200.
     All LLM calls, store operations, and WhatsApp sends happen in the worker.
     """
+    started_at = perf_counter()
+    correlation_ids: list[str] = []
+    observed_client_ids: set[int] = set()
     # 1. Verify signature
     signature = request.headers.get("X-Hub-Signature-256")
     body_bytes = await request.body()
@@ -200,6 +204,7 @@ async def receive_message(request: Request, response: Response):
                     )
 
                 current_client_id = tenant_context.client.id
+                observed_client_ids.add(current_client_id)
 
                 if "messages" in value:
                     for message in value["messages"]:
@@ -213,34 +218,44 @@ async def receive_message(request: Request, response: Response):
                             profile = contacts[0].get("profile", {}) if isinstance(contacts[0], dict) else {}
                             if isinstance(profile, dict) and profile.get("name"):
                                 job_payload["profile_name"] = profile["name"]
-                        _enqueue_or_retry(
+                        correlation_ids.append(_enqueue_or_retry(
                             kind="message",
                             payload=job_payload,
                             phone_number_id=phone_number_id,
                             client_id=current_client_id,
-                        )
+                        ))
 
                 if "statuses" in value:
                     for status in value["statuses"]:
                         if not isinstance(status, dict):
                             raise HTTPException(status_code=400, detail="Invalid WhatsApp status")
-                        _enqueue_or_retry(
+                        correlation_ids.append(_enqueue_or_retry(
                             kind="status",
                             payload=dict(status),
                             phone_number_id=phone_number_id,
                             client_id=current_client_id,
-                        )
+                        ))
 
+        from app.services.whatsapp_observability import process_metrics
+
+        process_metrics.observe_webhook_ack(
+            (perf_counter() - started_at) * 1000, client_ids=observed_client_ids
+        )
+        if correlation_ids and isinstance(correlation_ids[0], str):
+            response.headers["X-Correlation-ID"] = correlation_ids[0]
         return {"status": "queued"}
+    from app.services.whatsapp_observability import process_metrics
+
+    process_metrics.observe_webhook_ack((perf_counter() - started_at) * 1000)
     return {"status": "ignored"}
 
 
-def _enqueue_or_retry(*, kind: str, payload: dict, phone_number_id: str, client_id: int) -> None:
+def _enqueue_or_retry(*, kind: str, payload: dict, phone_number_id: str, client_id: int) -> str:
     """Never substitute in-process work when the durable queue is unavailable."""
     from app.services.whatsapp_queue import PermanentWebhookError, enqueue_event
 
     try:
-        enqueue_event(
+        return enqueue_event(
             kind=kind,
             payload=payload,
             phone_number_id=phone_number_id,

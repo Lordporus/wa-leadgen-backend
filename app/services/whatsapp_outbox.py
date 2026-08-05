@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from app.clients.whatsapp_client import MetaTransportError
 from app.core import database
 from app.core.models import Client, Lead, Message, WhatsAppOperatorAction, WhatsAppOutboundIntent, WhatsAppWebhookEvent
+from app.services.whatsapp_observability import correlation_context
 from app.services import whatsapp_policy
 
 
@@ -27,6 +28,35 @@ class DispatchResult:
 
 
 _STATUS_ORDER = {"pending": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _durable_correlation_locked(session: Any, intent: WhatsAppOutboundIntent) -> str:
+    event = session.query(WhatsAppWebhookEvent).filter_by(
+        id=intent.inbound_event_id,
+        client_id=intent.client_id,
+    ).one_or_none()
+    correlation_id = str(getattr(event, "correlation_id", "") or "").strip()
+    if not correlation_id:
+        raise OutboundIntentError("Outbound intent has no durable correlation ID")
+    current = str(intent.correlation_id or "").strip()
+    if current and current != correlation_id:
+        raise OutboundIntentError("Outbound intent correlation does not match its receipt")
+    if not current:
+        intent.correlation_id = correlation_id
+    return correlation_id
+
+
+def _next_provider_status(current: str, incoming: str) -> str | None:
+    """Return a monotonic next status, with failure terminal once accepted."""
+    if current == "failed":
+        return None
+    if incoming == "failed":
+        return "failed" if current in {"pending", "sent"} else None
+    if incoming not in _STATUS_ORDER:
+        return None
+    if _STATUS_ORDER.get(incoming, -1) > _STATUS_ORDER.get(current, -1):
+        return incoming
+    return None
 
 
 def _mark_blocked_locked(
@@ -70,13 +100,18 @@ def create_or_get_intent(
             client_id=client_id, inbound_event_id=event.id, reply_version=reply_version
         ).one_or_none()
         if existing is not None:
+            _durable_correlation_locked(session, existing)
+            session.commit()
             return existing.id
+        durable_correlation = str(event.correlation_id or "").strip()
+        if not durable_correlation or (correlation_id and correlation_id != durable_correlation):
+            raise OutboundIntentError("Outbound correlation does not match the inbound receipt")
         lead = session.query(Lead).filter_by(client_id=client_id, phone=recipient_phone).with_for_update().one_or_none()
         if lead is None:
             raise OutboundIntentError("Outbound recipient is not a tenant lead")
         intent = WhatsAppOutboundIntent(
             client_id=client_id, inbound_event_id=event.id, reply_version=reply_version,
-            recipient_phone=recipient_phone, correlation_id=correlation_id, state="pending",
+            recipient_phone=recipient_phone, correlation_id=durable_correlation, state="pending",
             intent_kind="ai_reply", takeover_version=lead.takeover_version,
         )
         session.add(intent)
@@ -394,12 +429,13 @@ def apply_provider_status(*, client_id: int, provider_message_id: str, status: s
         if intent is None:
             return False
         current = (intent.provider_status or "pending").lower()
-        if _STATUS_ORDER.get(normalized, -1) > _STATUS_ORDER.get(current, -1):
-            intent.provider_status = normalized
+        next_status = _next_provider_status(current, normalized)
+        if next_status is not None:
+            intent.provider_status = next_status
             intent.status_updated_at = datetime.utcnow()
             message = session.query(Message).filter_by(outbound_intent_id=intent.id).one_or_none()
             if message is not None:
-                message.status = normalized
+                message.status = next_status
             session.commit()
         return True
 
@@ -410,11 +446,13 @@ def process_outbound_intent(*, intent_id: int, client_id: int) -> DispatchResult
     if database.SessionLocal is None:
         raise OutboundIntentError("WhatsApp outbox requires the durable database")
     with database.SessionLocal() as session:
-        intent = session.query(WhatsAppOutboundIntent).filter_by(id=intent_id, client_id=client_id).one()
+        intent = session.query(WhatsAppOutboundIntent).filter_by(id=intent_id, client_id=client_id).with_for_update().one()
         if not intent.body:
             raise OutboundIntentError("Outbound intent has no persisted reply text")
         recipient, body, audit_id = intent.recipient_phone, intent.body, intent.ai_decision_audit_id
         intent_kind = intent.intent_kind
+        correlation_id = _durable_correlation_locked(session, intent)
+        session.commit()
     def guard(session, client, lead):
         return ai_decision.durable_reply_guard(
             session,
@@ -425,14 +463,15 @@ def process_outbound_intent(*, intent_id: int, client_id: int) -> DispatchResult
             body=body,
         )
     is_manual = intent_kind == "manual"
-    result = dispatch_intent(
-        intent_id=intent_id,
-        client_id=client_id,
-        sender=whatsapp.send_message,
-        final_guard=None if is_manual else guard,
-        action="human_manual_send" if is_manual else "queued_reply_send",
-        allow_human_takeover=is_manual,
-    )
+    with correlation_context(correlation_id, tenant_id=client_id):
+        result = dispatch_intent(
+            intent_id=intent_id,
+            client_id=client_id,
+            sender=whatsapp.send_message,
+            final_guard=None if is_manual else guard,
+            action="human_manual_send" if is_manual else "queued_reply_send",
+            allow_human_takeover=is_manual,
+        )
     if result.newly_sent and result.provider_message_id:
         store.append_message(recipient, direction="outbound", message=body, msg_type="human" if is_manual else "text", wa_message_id=result.provider_message_id, client_id=client_id)
     return result
@@ -446,6 +485,7 @@ def replay_outbound_intent(*, intent_id: int, client_id: int) -> str:
         intent = session.query(WhatsAppOutboundIntent).filter_by(id=intent_id, client_id=client_id).with_for_update().one_or_none()
         if intent is None or intent.state != "failed" or not intent.body:
             raise ValueError("Only failed intents with persisted reply text can be replayed")
+        _durable_correlation_locked(session, intent)
         intent.state = "generating"
         intent.failure_category = None
         intent.failure_reason = None
