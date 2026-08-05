@@ -255,21 +255,57 @@ def process_webhook_event(envelope: dict[str, Any]) -> None:
         _mark_state(tenant_id, kind, event_id, "processed")
 
 
-def replay_dead_letter(*, receipt_id: int) -> str:
-    """Explicit operator tool: put one dead-letter event back on the durable queue."""
+def enqueue_persisted_receipt(*, receipt_id: int, client_id: int, job_id: str) -> str:
+    """Enqueue one inspected receipt without clearing its dead-letter evidence."""
     if database.SessionLocal is None:
         raise RuntimeError("WhatsApp queue requires the durable database receipt store")
+    if webhook_queue is None:
+        raise RuntimeError("WhatsApp queue is unavailable")
     with database.SessionLocal() as session:
-        receipt = session.get(WhatsAppWebhookEvent, receipt_id)
-        if receipt is None or receipt.state not in {"dead_letter", "enqueue_failed"}:
-            raise ValueError("Only dead-lettered or enqueue-failed WhatsApp events can be replayed")
-        kind, payload, phone_number_id, client_id = (
-            receipt.event_kind,
-            dict(receipt.payload),
-            receipt.phone_number_id,
-            receipt.client_id,
+        receipt = session.query(WhatsAppWebhookEvent).filter_by(
+            id=receipt_id,
+            client_id=client_id,
+        ).one_or_none()
+        if receipt is None or receipt.state not in {"replay_requested", "enqueue_failed"}:
+            raise ValueError("Receipt is not prepared for replay")
+        envelope = {
+            "event_id": receipt.event_id,
+            "event_kind": receipt.event_kind,
+            "tenant_id": receipt.client_id,
+            "phone_number_id": receipt.phone_number_id,
+            "correlation_id": receipt.correlation_id,
+            "attempt": receipt.attempt_count,
+            "payload": dict(receipt.payload),
+        }
+    existing = webhook_queue.fetch_job(job_id)
+    if existing is not None:
+        return existing.id
+    try:
+        job = webhook_queue.enqueue(
+            process_webhook_event,
+            envelope,
+            job_id=job_id,
+            job_timeout=WHATSAPP_RQ_JOB_TIMEOUT,
+            retry=Retry(
+                max=WHATSAPP_RQ_MAX_RETRIES,
+                interval=list(WHATSAPP_RQ_RETRY_INTERVALS),
+            ),
+            meta={"whatsapp_initial_retries": WHATSAPP_RQ_MAX_RETRIES},
         )
-    return enqueue_event(kind=kind, payload=payload, phone_number_id=phone_number_id, client_id=client_id)
+    except Exception:
+        existing = webhook_queue.fetch_job(job_id)
+        if existing is None:
+            raise
+        return existing.id
+    return job.id
+
+
+def replay_dead_letter(*, receipt_id: int) -> str:
+    """Reject the legacy unauthenticated replay path."""
+    del receipt_id
+    raise RuntimeError(
+        "Direct dead-letter replay is disabled; use the protected tenant API"
+    )
 
 
 def _mark_retry_or_dead_letter(client_id: int, kind: str, event_id: str, error: Exception) -> None:

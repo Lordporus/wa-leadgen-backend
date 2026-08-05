@@ -82,6 +82,12 @@ def configure_whatsapp_logging() -> None:
     for name in (
         "app.api.routers.whatsapp",
         "app.api.routers.whatsapp_operations",
+        "app.api.routers.whatsapp_dead_letters",
+        "app.api.routers.whatsapp_observability",
+        "app.clients.whatsapp_client",
+        "app.services.whatsapp_inbox",
+        "app.services.whatsapp_alert_delivery",
+        "app.services.whatsapp_dead_letters",
         "app.api.routers.whatsapp_observability",
         "app.clients.whatsapp_client",
         "app.services.whatsapp_inbox",

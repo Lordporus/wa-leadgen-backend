@@ -24,6 +24,7 @@ from app.api.routers import (
     leads,
     settings,
     whatsapp as whatsapp_routes,
+    whatsapp_dead_letters as whatsapp_dead_letter_routes,
     whatsapp_observability as whatsapp_observability_routes,
     whatsapp_operations as whatsapp_operations_routes,
     whatsapp_policy as whatsapp_policy_routes,
@@ -38,6 +39,7 @@ from app.core.config import (
 from app.services import analytics as analytics_service
 from app.services import tenant
 from app.services import whatsapp_policy
+from app.services import whatsapp_alert_delivery
 
 
 def follow_up_job():
@@ -186,6 +188,13 @@ scheduler.add_job(
     id="email_campaign_tick",
     replace_existing=True,
 )
+scheduler.add_job(
+    whatsapp_alert_delivery.deliver_active_alerts,
+    "interval",
+    minutes=1,
+    id="whatsapp_operational_alert_delivery",
+    replace_existing=True,
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -230,6 +239,7 @@ app.include_router(billing.router)
 app.include_router(health.router)
 app.include_router(whatsapp_routes.router)
 app.include_router(whatsapp_observability_routes.tenant_router)
+app.include_router(whatsapp_dead_letter_routes.router)
 app.include_router(whatsapp_observability_routes.admin_router)
 app.include_router(whatsapp_operations_routes.tenant_router)
 app.include_router(whatsapp_operations_routes.admin_router)
