@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
+from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -20,7 +22,8 @@ from app.core.config import (
     WHATSAPP_RQ_MAX_RETRIES,
     WHATSAPP_RQ_RETRY_INTERVALS,
 )
-from app.core.models import WhatsAppWebhookEvent
+from app.core.models import WhatsAppOutboundIntent, WhatsAppWebhookEvent
+from app.services.whatsapp_observability import correlation_context, process_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +61,21 @@ def enqueue_event(*, kind: str, payload: dict[str, Any], phone_number_id: str, c
             .one_or_none()
         )
         if receipt and receipt.state in {"queued", "processing", "processed"}:
+            process_metrics.increment_duplicate(client_id)
             return receipt.correlation_id
         if receipt is None:
+            correlation_id = str(uuid.uuid4())
+            if kind == "status":
+                intent = session.query(WhatsAppOutboundIntent).filter_by(
+                    client_id=client_id, provider_message_id=event_id,
+                ).one_or_none()
+                if intent is not None and intent.correlation_id:
+                    correlation_id = intent.correlation_id
             receipt = WhatsAppWebhookEvent(
                 client_id=client_id,
                 event_kind=kind,
                 event_id=event_id,
-                correlation_id=str(uuid.uuid4()),
+                correlation_id=correlation_id,
                 phone_number_id=phone_number_id,
                 payload=payload,
                 state="received",
@@ -86,6 +97,7 @@ def enqueue_event(*, kind: str, payload: dict[str, Any], phone_number_id: str, c
             existing = session.query(WhatsAppWebhookEvent).filter_by(
                 client_id=client_id, event_kind=kind, event_id=event_id
             ).one()
+            process_metrics.increment_duplicate(client_id)
             return existing.correlation_id
 
         envelope = {
@@ -120,6 +132,64 @@ def enqueue_event(*, kind: str, payload: dict[str, Any], phone_number_id: str, c
         return receipt.correlation_id
 
 
+def _restore_durable_correlation(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Replace job arguments with the locked durable correlation source."""
+    tenant_id = envelope.get("tenant_id")
+    kind = envelope.get("event_kind")
+    event_id = envelope.get("event_id")
+    if not isinstance(tenant_id, int) or kind not in {"message", "status"} or not isinstance(event_id, str):
+        raise PermanentWebhookError("Invalid WhatsApp correlation envelope")
+    if database.SessionLocal is None:
+        raise RuntimeError("WhatsApp queue requires the durable database receipt store")
+    with database.SessionLocal() as session:
+        receipt = session.query(WhatsAppWebhookEvent).filter_by(
+            client_id=tenant_id,
+            event_kind=kind,
+            event_id=event_id,
+        ).with_for_update().one_or_none()
+        if receipt is None:
+            raise PermanentWebhookError("WhatsApp job has no durable receipt")
+        correlation_id = str(receipt.correlation_id or "").strip()
+        if kind == "status":
+            intent = session.query(WhatsAppOutboundIntent).filter_by(
+                client_id=tenant_id,
+                provider_message_id=event_id,
+            ).with_for_update().one_or_none()
+            if intent is not None:
+                inbound = session.query(WhatsAppWebhookEvent).filter_by(
+                    id=intent.inbound_event_id,
+                    client_id=tenant_id,
+                ).one_or_none()
+                original = str(getattr(inbound, "correlation_id", "") or "").strip()
+                current = str(intent.correlation_id or "").strip()
+                if not original or (current and current != original):
+                    raise PermanentWebhookError("Outbound intent correlation is not durable")
+                correlation_id = original
+                if not current:
+                    intent.correlation_id = original
+                if receipt.correlation_id != original:
+                    receipt.correlation_id = original
+        if not correlation_id:
+            raise PermanentWebhookError("WhatsApp job correlation is missing")
+        session.commit()
+    resolved = dict(envelope)
+    resolved["correlation_id"] = correlation_id
+    return resolved
+
+
+def _correlated_job(
+    function: Callable[[dict[str, Any]], None],
+) -> Callable[[dict[str, Any]], None]:
+    @wraps(function)
+    def wrapped(envelope: dict[str, Any]) -> None:
+        resolved = _restore_durable_correlation(envelope)
+        with correlation_context(resolved["correlation_id"], tenant_id=resolved["tenant_id"]):
+            function(resolved)
+
+    return wrapped
+
+
+@_correlated_job
 def process_webhook_event(envelope: dict[str, Any]) -> None:
     """RQ worker entry point; all WhatsApp business work starts here."""
     kind = envelope.get("event_kind")
@@ -173,7 +243,7 @@ def process_webhook_event(envelope: dict[str, Any]) -> None:
         else:
             jobs.process_status_update(
                 payload, current_client_id=tenant_id, phone_number_id=phone_number_id,
-                require_known_intent=True,
+                require_known_intent=True, correlation_id=envelope.get("correlation_id"),
             )
     except Exception as exc:
         if _is_retryable_error(exc):

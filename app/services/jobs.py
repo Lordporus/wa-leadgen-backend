@@ -331,6 +331,7 @@ def process_status_update(
     current_client_id: int | None = None,
     phone_number_id: str | None = None,
     require_known_intent: bool = False,
+    correlation_id: str | None = None,
 ):
     """Process a WhatsApp message status update (delivered/read)."""
     ctx = tenant.resolve_context_by_phone_id(phone_number_id) if phone_number_id else None
@@ -354,7 +355,14 @@ def process_status_update(
     store = get_store()
     wamid = status_data["id"]
     status_str = status_data["status"]
-    logger.info(f"[RQ] Message {wamid} status: {status_str}")
+    logger.info(
+        "whatsapp_provider_status_update",
+        extra={
+            "event": "whatsapp_provider_status_update",
+            "correlation_id": correlation_id,
+            "provider_status": status_str,
+        },
+    )
     if require_known_intent and not whatsapp_outbox.apply_provider_status(
         client_id=current_client_id, provider_message_id=wamid, status=status_str,
     ):
@@ -380,7 +388,7 @@ def _run_analytics(
                 client_id=current_client_id,
             )
     except Exception as e:
-        logger.error(f"Lead info extraction failed: {e}")
+        logger.error("lead_info_extraction_failed", extra={"error_type": type(e).__name__})
 
     try:
         score_data = req_gemini.score_lead(updated_last_message)
@@ -443,4 +451,4 @@ def _run_analytics(
                         logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
 
     except Exception as e:
-        logger.error(f"Analytics/Scoring process failed: {e}")
+        logger.error("analytics_scoring_failed", extra={"error_type": type(e).__name__})

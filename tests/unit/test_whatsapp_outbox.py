@@ -23,6 +23,10 @@ def test_status_order_is_monotonic():
     assert whatsapp_outbox._STATUS_ORDER["sent"] < whatsapp_outbox._STATUS_ORDER["delivered"]
     assert whatsapp_outbox._STATUS_ORDER["delivered"] < whatsapp_outbox._STATUS_ORDER["read"]
 
+    assert whatsapp_outbox._next_provider_status("sent", "failed") == "failed"
+    assert whatsapp_outbox._next_provider_status("failed", "delivered") is None
+    assert whatsapp_outbox._next_provider_status("delivered", "failed") is None
+
 
 def test_replay_refuses_unknown_send_outcomes(monkeypatch):
     class Query:
@@ -57,17 +61,20 @@ def test_replay_refuses_unknown_send_outcomes(monkeypatch):
 def test_failed_replay_is_forced_through_resumed_validation_worker(monkeypatch):
     from app.api import runtime
 
-    intent = type("Intent", (), {"state": "failed", "body": "persisted", "failure_category": "provider_exception", "failure_reason": "offline"})()
+    intent = type("Intent", (), {"state": "failed", "body": "persisted", "failure_category": "provider_exception", "failure_reason": "offline", "inbound_event_id": 8, "client_id": 7, "correlation_id": None})()
+    event = type("Event", (), {"correlation_id": "durable-correlation"})()
 
     class Query:
         def filter_by(self, **_): return self
         def with_for_update(self): return self
-        def one_or_none(self): return intent
+        def one_or_none(self):
+            return event if self.model is whatsapp_outbox.WhatsAppWebhookEvent else intent
+        def __init__(self, model): self.model = model
 
     class Session:
         def __enter__(self): return self
         def __exit__(self, *_): return False
-        def query(self, _): return Query()
+        def query(self, model): return Query(model)
         def commit(self): pass
 
     queued = []
@@ -80,6 +87,7 @@ def test_failed_replay_is_forced_through_resumed_validation_worker(monkeypatch):
     monkeypatch.setattr(whatsapp_outbox.database, "SessionLocal", Session)
     monkeypatch.setattr(runtime, "webhook_queue", Queue())
     assert whatsapp_outbox.replay_outbound_intent(intent_id=4, client_id=7) == "job-phase9-replay"
+    assert intent.correlation_id == "durable-correlation"
     assert queued == [(whatsapp_outbox.process_outbound_intent, {"intent_id": 4, "client_id": 7})]
 
 
