@@ -1,16 +1,65 @@
+# VCS & CI
 .git
 .github
+.gitignore
+
+# Environment files
 .env
 .env.*
 !*.env.example
+
+# Python caches & bytecode
 __pycache__
 *.py[cod]
+*.pyc
+*.pyo
 .pytest_cache
 .mypy_cache
 .ruff_cache
 .coverage
 htmlcov
+coverage.xml
+
+# Local virtual environments & binaries
+venv
+.venv
+codebase-memory-mcp.exe
+codebase-memory-mcp.zip
+
+# Tests & static checking
 tests
+pytest.ini
+mypy.ini
+requirements-dev.txt
+
+# Documentation & handover notes
 docs
+*.md
+LICENSE
+THIRD_PARTY_NOTICES.md
+
+# IDE & Tool configurations
+.claude
+.codebase-memory
+.codegraph
+.cgcignore
+.gemini
+.mcp.json
+opencode.jsonc
+debug
+
+# Platform & Deployment manifests
 deploy
-PROJECT_HANDOVER.md
+render.yaml
+
+# One-off / Temporary / Fix / Audit scripts
+fix_*.py
+patch_*.py
+test_*.py
+audit_*.py
+extract_*.py
+get_funcs.py
+install.ps1
+*.tmp
+*.log
+
