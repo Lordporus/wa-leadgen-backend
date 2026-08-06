@@ -301,6 +301,34 @@ def dispatch_intent(
                 session.commit()
                 return DispatchResult("blocked")
 
+            from app.services import whatsapp_pilot
+
+            pilot_reason = whatsapp_pilot.final_send_gate_locked(
+                session,
+                client=client,
+                lead=lead,
+                action=action,
+                message_type="text",
+            )
+            if pilot_reason:
+                _mark_blocked_locked(
+                    session, intent, category="pilot_blocked", reason=pilot_reason
+                )
+                whatsapp_policy.set_provider_audit_outcome(
+                    session, decision, outcome="blocked", failure_category=pilot_reason
+                )
+                from app.services import ai_decision
+
+                ai_decision.mark_audit_outcome_locked(
+                    session,
+                    audit_id=intent.ai_decision_audit_id,
+                    client_id=client_id,
+                    outcome="blocked",
+                    reason=pilot_reason,
+                )
+                session.commit()
+                return DispatchResult("blocked")
+
             if final_guard is not None:
                 guard_reason = final_guard(session, client, lead)
                 if guard_reason:

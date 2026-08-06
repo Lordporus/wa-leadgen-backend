@@ -702,6 +702,7 @@ def send_immediate_template(
     recipient_kind: str = "lead",
     verifier: Callable[..., Any] | None = None,
     final_guard: Callable[[Any, Client, Lead | None], str | None] | None = None,
+    pilot_sequence_id: int | None = None,
 ) -> ImmediateSendResult:
     return _send_immediate(
         client_id=client_id,
@@ -725,6 +726,7 @@ def send_immediate_template(
         recipient_kind=recipient_kind,
         verifier=verifier,
         final_guard=final_guard,
+        pilot_sequence_id=pilot_sequence_id,
     )
 
 
@@ -747,6 +749,7 @@ def _send_immediate(
     verifier: Callable[..., Any] | None = None,
     template_parameters: list[Any] | dict[str, Any] | None = None,
     final_guard: Callable[[Any, Client, Lead | None], str | None] | None = None,
+    pilot_sequence_id: int | None = None,
 ) -> ImmediateSendResult:
     if database.SessionLocal is None:
         raise WhatsAppPolicyError("WhatsApp send policy requires the durable database")
@@ -828,6 +831,27 @@ def _send_immediate(
                 )
                 session.commit()
                 return ImmediateSendResult("blocked", decision.reason_code)
+            from app.services import whatsapp_pilot
+
+            pilot_reason = whatsapp_pilot.final_send_gate_locked(
+                session,
+                client=client,
+                lead=lead,
+                action=action,
+                message_type=message_type,
+                template=template,
+                recipient_kind=recipient_kind,
+                sequence_id=pilot_sequence_id,
+            )
+            if pilot_reason:
+                set_provider_audit_outcome(
+                    session,
+                    decision,
+                    outcome="blocked",
+                    failure_category=pilot_reason,
+                )
+                session.commit()
+                return ImmediateSendResult("blocked", pilot_reason)
             if final_guard is not None:
                 guard_reason = final_guard(session, client, lead)
                 if guard_reason:

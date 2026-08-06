@@ -563,6 +563,7 @@ def _process_claim(execution_id: int, now: datetime) -> str:
             parameters=parameters,
             sender=whatsapp.send_template,
             action="sequence_step_send",
+            pilot_sequence_id=sequence_id,
             final_guard=lambda policy_session,
             policy_client,
             policy_lead: _final_sequence_guard(
