@@ -28,6 +28,7 @@ from app.api.routers import (
     whatsapp_observability as whatsapp_observability_routes,
     whatsapp_operations as whatsapp_operations_routes,
     whatsapp_policy as whatsapp_policy_routes,
+    whatsapp_pilot as whatsapp_pilot_routes,
     whatsapp_sequences as whatsapp_sequences_routes,
 )
 from app.api.runtime import calendly, logger, store, whatsapp
@@ -244,5 +245,6 @@ app.include_router(whatsapp_observability_routes.admin_router)
 app.include_router(whatsapp_operations_routes.tenant_router)
 app.include_router(whatsapp_operations_routes.admin_router)
 app.include_router(whatsapp_policy_routes.router)
+app.include_router(whatsapp_pilot_routes.router)
 app.include_router(whatsapp_sequences_routes.router)
 app.include_router(analytics.router)

@@ -23,11 +23,15 @@ AI_AUTO_REPLY = "ai_auto_reply"
 SEQUENCE = "sequence"
 TEMPLATE = "template"
 WORKER_CONSUMPTION = "worker_consumption"
+PILOT_ENABLED = "pilot_enabled"
+PILOT_STAGE_2 = "pilot_stage_2"
+PILOT_STAGE_3 = "pilot_stage_3"
 
 GLOBAL_CONTROLS = frozenset({GLOBAL_OUTBOUND, WORKER_CONSUMPTION})
 TENANT_CONTROLS = frozenset(
     {TENANT_OUTBOUND, AI_AUTO_REPLY, SEQUENCE, TEMPLATE}
 )
+PILOT_CONTROLS = frozenset({PILOT_ENABLED, PILOT_STAGE_2, PILOT_STAGE_3})
 
 
 class OperationalControlError(RuntimeError):
@@ -67,6 +71,11 @@ class ControlState:
             "updated_at": self.updated_at,
         }
 
+@dataclass(frozen=True)
+class MutationRequest:
+    control: str
+    enabled_value: bool
+    expected_version: int
 
 def _factory():
     if database.SessionLocal is None:
@@ -85,7 +94,7 @@ def _key(
                 "Global controls cannot include tenant or resource IDs"
             )
         return "global", f"global:{control}"
-    if control not in TENANT_CONTROLS or client_id is None:
+    if control not in TENANT_CONTROLS | PILOT_CONTROLS or client_id is None:
         raise OperationalControlError("Unknown or incomplete tenant control")
     if control in {SEQUENCE, TEMPLATE}:
         if resource_id is None or resource_id <= 0:
@@ -116,7 +125,7 @@ def _state(
     client_id: int | None,
     resource_id: int | None,
 ) -> ControlState:
-    configured = True if row is None else bool(row.enabled)
+    configured = control not in PILOT_CONTROLS if row is None else bool(row.enabled)
     return ControlState(
         control=control,
         enabled=configured,
@@ -173,6 +182,27 @@ def enabled(
             resource_id=resource_id,
         )
 
+
+def state_locked(
+    session,
+    control: str,
+    *,
+    client_id: int | None = None,
+    resource_id: int | None = None,
+    lock: bool = False,
+) -> ControlState:
+    """Return complete control state using the caller's transaction."""
+    scope, control_key = _key(control, client_id=client_id, resource_id=resource_id)
+    query = session.query(WhatsAppOperationalControl).filter_by(control_key=control_key)
+    if lock:
+        query = query.with_for_update()
+    return _state(
+        query.one_or_none(),
+        control=control,
+        scope=scope,
+        client_id=client_id,
+        resource_id=resource_id,
+    )
 
 def _validate_target_locked(
     session,
@@ -389,3 +419,127 @@ def sync_worker_suspension(*, enabled_value: bool) -> bool:
     else:
         suspend(redis_conn)
     return True
+
+
+
+def mutate_multiple(
+    *,
+    requests: list[MutationRequest],
+    operator_id: str,
+    reason: str,
+    correlation_id: str,
+    client_id: int | None = None,
+    resource_id: int | None = None,
+) -> dict[str, ControlState]:
+    """Atomically transition multiple operational controls and append audit rows."""
+    if not operator_id.strip() or not reason.strip() or not correlation_id.strip():
+        raise OperationalControlError(
+            "operator, reason, and correlation_id are required"
+        )
+    for req in requests:
+        if req.expected_version < 0:
+            raise OperationalControlError("expected_version cannot be negative")
+
+    sorted_reqs = sorted(requests, key=lambda r: _key(r.control, client_id=client_id, resource_id=resource_id)[1])
+    
+    try:
+        with _factory()() as session:
+            first_corr = f"{correlation_id}:{sorted_reqs[0].control}"
+            prior_audit = (
+                session.query(WhatsAppOperationalControlAudit)
+                .filter_by(correlation_id=first_corr)
+                .one_or_none()
+            )
+            if prior_audit is not None:
+                results = {}
+                for req in requests:
+                    scope, control_key = _key(req.control, client_id=client_id, resource_id=resource_id)
+                    row = session.query(WhatsAppOperationalControl).filter_by(control_key=control_key).one()
+                    results[req.control] = _state(row, control=req.control, scope=scope, client_id=client_id, resource_id=resource_id)
+                return results
+
+            prepared = {}
+            for req in sorted_reqs:
+                scope, control_key = _key(req.control, client_id=client_id, resource_id=resource_id)
+                _validate_target_locked(session, control=req.control, client_id=client_id, resource_id=resource_id)
+                row = (
+                    session.query(WhatsAppOperationalControl)
+                    .filter_by(control_key=control_key)
+                    .with_for_update()
+                    .one_or_none()
+                )
+                current_version = 0 if row is None else row.version
+                if current_version != req.expected_version:
+                    raise OperationalControlConflict(
+                        f"stale control version for {req.control}: expected {req.expected_version}, "
+                        f"current {current_version}"
+                    )
+                prepared[req] = (row, scope, control_key, current_version)
+
+            saved_rows: dict[MutationRequest, WhatsAppOperationalControl] = {}
+            for req, (row, scope, control_key, current_version) in prepared.items():
+                previous = None if row is None else bool(row.enabled)
+                next_version = current_version + 1
+                now = datetime.now(timezone.utc)
+                if row is None:
+                    row = WhatsAppOperationalControl(
+                        control_key=control_key,
+                        scope=scope,
+                        client_id=client_id,
+                        control_type=req.control,
+                        resource_id=resource_id,
+                        enabled=req.enabled_value,
+                        version=next_version,
+                        updated_by=operator_id.strip(),
+                        reason=reason.strip(),
+                        correlation_id=f"{correlation_id}:{req.control}",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(row)
+                    session.flush()
+                else:
+                    row.enabled = req.enabled_value
+                    row.version = next_version
+                    row.updated_by = operator_id.strip()
+                    row.reason = reason.strip()
+                    row.correlation_id = f"{correlation_id}:{req.control}"
+                    row.updated_at = now
+                session.add(
+                    WhatsAppOperationalControlAudit(
+                        control_id=row.id,
+                        control_key=control_key,
+                        scope=scope,
+                        client_id=client_id,
+                        control_type=req.control,
+                        resource_id=resource_id,
+                        from_enabled=previous,
+                        to_enabled=req.enabled_value,
+                        from_version=current_version,
+                        to_version=next_version,
+                        operator_id=operator_id.strip(),
+                        reason=reason.strip(),
+                        correlation_id=f"{correlation_id}:{req.control}",
+                        created_at=now,
+                    )
+                )
+                saved_rows[req] = row
+
+            session.commit()
+
+            final_results = {}
+            for req, saved_row in saved_rows.items():
+                session.refresh(saved_row)
+                scope, control_key = _key(req.control, client_id=client_id, resource_id=resource_id)
+                final_results[req.control] = _state(
+                    saved_row,
+                    control=req.control,
+                    scope=scope,
+                    client_id=client_id,
+                    resource_id=resource_id,
+                )
+            return final_results
+    except IntegrityError as exc:
+        raise OperationalControlConflict(
+            "Concurrent operational-control transition"
+        ) from exc
