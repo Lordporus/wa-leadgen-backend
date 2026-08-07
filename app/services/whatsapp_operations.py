@@ -458,7 +458,7 @@ def mutate_multiple(
                     results[req.control] = _state(row, control=req.control, scope=scope, client_id=client_id, resource_id=resource_id)
                 return results
 
-            rows_by_req = {}
+            prepared = {}
             for req in sorted_reqs:
                 scope, control_key = _key(req.control, client_id=client_id, resource_id=resource_id)
                 _validate_target_locked(session, control=req.control, client_id=client_id, resource_id=resource_id)
@@ -474,9 +474,10 @@ def mutate_multiple(
                         f"stale control version for {req.control}: expected {req.expected_version}, "
                         f"current {current_version}"
                     )
-                rows_by_req[req] = (row, scope, control_key, current_version)
+                prepared[req] = (row, scope, control_key, current_version)
 
-            for req, (row, scope, control_key, current_version) in rows_by_req.items():
+            saved_rows: dict[MutationRequest, WhatsAppOperationalControl] = {}
+            for req, (row, scope, control_key, current_version) in prepared.items():
                 previous = None if row is None else bool(row.enabled)
                 next_version = current_version + 1
                 now = datetime.now(timezone.utc)
@@ -522,16 +523,16 @@ def mutate_multiple(
                         created_at=now,
                     )
                 )
-                rows_by_req[req] = row
+                saved_rows[req] = row
 
             session.commit()
-            
+
             final_results = {}
-            for req, row in rows_by_req.items():
-                session.refresh(row)
+            for req, saved_row in saved_rows.items():
+                session.refresh(saved_row)
                 scope, control_key = _key(req.control, client_id=client_id, resource_id=resource_id)
                 final_results[req.control] = _state(
-                    row,
+                    saved_row,
                     control=req.control,
                     scope=scope,
                     client_id=client_id,

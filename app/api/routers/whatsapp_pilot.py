@@ -24,7 +24,9 @@ class PilotEnabledBody(StrictBody):
 class PilotStageBody(StrictBody):
     expected_stage: int = Field(ge=1, le=3)
     target_stage: int = Field(ge=1, le=3)
-    expected_version: int = Field(ge=0)
+    expected_version_stage_2: int = Field(default=0, ge=0)
+    expected_version_stage_3: int = Field(default=0, ge=0)
+    expected_version: int | None = Field(default=None, ge=0)
     reason: str = Field(min_length=1, max_length=255)
 
 
@@ -74,12 +76,15 @@ def transition_stage(
     client: Client = Depends(require_api_key),
 ):
     correlation_id, operator_id = _context(request, response, client.id)
+    v2 = body.expected_version if body.expected_version is not None else body.expected_version_stage_2
+    v3 = body.expected_version if body.expected_version is not None else body.expected_version_stage_3
     try:
         return whatsapp_pilot.transition_stage(
             client_id=client.id,
             expected_stage=body.expected_stage,
             target_stage=body.target_stage,
-            expected_version=body.expected_version,
+            expected_version_stage_2=v2,
+            expected_version_stage_3=v3,
             operator_id=operator_id,
             reason=body.reason,
             correlation_id=correlation_id,
