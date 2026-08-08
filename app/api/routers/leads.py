@@ -4,7 +4,6 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 
 from app.api.dependencies import get_client_key, limiter, require_api_key
 from app.api.runtime import logger, store
@@ -222,7 +221,7 @@ def _format_lead_row(record: dict) -> dict:
     last_msg = fields.get("Last_Message", "")
     last_activity = "—"
     if last_msg:
-        lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        lines = [line for line in last_msg.strip().splitlines() if line.strip()]
         if lines:
             m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", lines[-1])
             if m:
@@ -243,9 +242,8 @@ def _format_lead_row(record: dict) -> dict:
     # last_message: plain-text preview of the most recent message (≤80 chars)
     last_message_preview = ""
     if last_msg:
-        log_lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        log_lines = [line for line in last_msg.strip().splitlines() if line.strip()]
         if log_lines:
-            # Strip the "[YYYY-MM-DD HH:MM:SS] DIRECTION (type): " prefix
             raw_line = log_lines[-1]
             parts = raw_line.split("): ", 1)
             last_message_preview = (parts[1] if len(parts) > 1 else raw_line).strip()[:80]
