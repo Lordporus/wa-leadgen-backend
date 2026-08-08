@@ -4,7 +4,6 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 
 from app.api.dependencies import get_client_key, limiter, require_api_key
 from app.api.runtime import logger, store
@@ -12,7 +11,7 @@ from app.core.config import LEGACY_LEAD_ID_COMPAT_ENABLED
 from app.core.database import SessionLocal
 from app.core.models import Client, EmailSuppression, Lead
 from app.email.email_validation import validate_lead_email
-from app.services import whatsapp_inbox, whatsapp_outbox
+from app.services import tenant, whatsapp_inbox, whatsapp_outbox
 from app.store.db_client import DatabaseClient
 
 router = APIRouter()
@@ -222,7 +221,7 @@ def _format_lead_row(record: dict) -> dict:
     last_msg = fields.get("Last_Message", "")
     last_activity = "—"
     if last_msg:
-        lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        lines = [line for line in last_msg.strip().splitlines() if line.strip()]
         if lines:
             m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", lines[-1])
             if m:
@@ -243,9 +242,8 @@ def _format_lead_row(record: dict) -> dict:
     # last_message: plain-text preview of the most recent message (≤80 chars)
     last_message_preview = ""
     if last_msg:
-        log_lines = [l for l in last_msg.strip().splitlines() if l.strip()]
+        log_lines = [line for line in last_msg.strip().splitlines() if line.strip()]
         if log_lines:
-            # Strip the "[YYYY-MM-DD HH:MM:SS] DIRECTION (type): " prefix
             raw_line = log_lines[-1]
             parts = raw_line.split("): ", 1)
             last_message_preview = (parts[1] if len(parts) > 1 else raw_line).strip()[:80]
@@ -267,30 +265,41 @@ def _format_lead_row(record: dict) -> dict:
 @router.get("/api/stats/dashboard")
 @limiter.limit("120/minute", key_func=get_client_key)
 def get_dashboard_stats(request: Request, response: Response, client: Client = Depends(require_api_key)):
-    """Aggregate lead counts and 7-day weekly activity from Postgres."""
-    with SessionLocal() as s:
-        total = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id"), {"client_id": client.id}).scalar() or 0
-        booked = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id AND status = 'Booked'"), {"client_id": client.id}).scalar() or 0
-        lost = s.execute(text("SELECT COUNT(*) FROM leads WHERE client_id = :client_id AND status = 'Lost'"), {"client_id": client.id}).scalar() or 0
+    """Aggregate lead counts and 7-day weekly activity from authoritative store data."""
+    try:
+        all_leads = store.get_all_leads(client_id=client.id)
+    except Exception:
+        all_leads = []
 
-        weekly: dict[str, dict] = {}
-        now = datetime.now()
-        for i in range(7):
-            day = (now - timedelta(days=6 - i)).strftime("%a")
-            weekly[day] = {"day": day, "newLeads": 0, "booked": 0}
+    won_stages = set(tenant.get_won_stage_names(client.id))
+    lost_stages = set(tenant.get_lost_stage_names(client.id))
 
-        recent = s.execute(text("""
-            SELECT created_at, status FROM leads
-            WHERE client_id = :client_id AND created_at >= CURRENT_DATE - INTERVAL '7 days'
-        """), {"client_id": client.id}).fetchall()
+    total = len(all_leads)
+    booked = 0
+    lost = 0
 
-        for r in recent:
-            if r.created_at:
-                day_key = r.created_at.strftime("%a")
-                if day_key in weekly:
-                    weekly[day_key]["newLeads"] += 1
-                    if r.status == "Booked":
-                        weekly[day_key]["booked"] += 1
+    weekly: dict[str, dict] = {}
+    now = datetime.now()
+    for i in range(7):
+        day = (now - timedelta(days=6 - i)).strftime("%a")
+        weekly[day] = {"day": day, "newLeads": 0, "booked": 0}
+
+    for record in all_leads:
+        fields = record.get("fields", {}) if isinstance(record, dict) else {}
+        stage = fields.get("Status", "New Lead")
+        if stage in won_stages:
+            booked += 1
+        elif stage in lost_stages:
+            lost += 1
+
+        raw_created = fields.get("Created_At", "")
+        created_dt = _parse_created_at(raw_created)
+        if created_dt:
+            day_key = created_dt.strftime("%a")
+            if day_key in weekly:
+                weekly[day_key]["newLeads"] += 1
+                if stage in won_stages:
+                    weekly[day_key]["booked"] += 1
 
     conversion_rate = round((booked / total * 100)) if total else 0
 
