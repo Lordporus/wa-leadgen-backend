@@ -70,6 +70,9 @@ debug/live_checks/
 # Pytest cache
 .pytest_cache/
 
+# Local production migration exports. These contain lead PII and must never be committed.
+.migration-backups/
+
 # Python cache
 __pycache__/
 *.pyc

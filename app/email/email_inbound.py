@@ -39,6 +39,7 @@ from app.services.guardrails import (
 )
 from app.core.models import Client, EmailSuppression, Lead, Message
 from app.services.usage import check_limit, estimate_tokens, log_usage
+from app.services.lead_stage import mutate_lead_stage
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,14 @@ def process_inbound_email_event(
         session.add(inbound_msg)
         lead.updated_at = datetime.utcnow()
         if (lead.status or "") == "New Lead":
-            lead.status = "Contacted"
+            mutate_lead_stage(
+                session,
+                client_id=db_client.id,
+                lead_id=lead.id,
+                new_stage="Contacted",
+                source="email:inbound",
+                actor="system:email-inbound",
+            )
         session.commit()
         session.refresh(inbound_msg)
 

@@ -863,6 +863,33 @@ class PipelineStage(Base):
         return f"<PipelineStage id={self.id} name={self.name!r} pos={self.position}>"
 
 
+class LeadStageChangeAudit(Base):
+    """Append-only audit for canonical tenant-scoped lead stage changes."""
+    __tablename__ = "lead_stage_change_audits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="RESTRICT"), nullable=False
+    )
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="RESTRICT"), nullable=False
+    )
+    old_stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    new_stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+Index(
+    "idx_lead_stage_change_audits_tenant_lead_time",
+    LeadStageChangeAudit.client_id,
+    LeadStageChangeAudit.lead_id,
+    LeadStageChangeAudit.created_at,
+)
+
 class PromptTemplate(Base):
     """System-wide prompt template presets that any client can load."""
     __tablename__ = "prompt_templates"

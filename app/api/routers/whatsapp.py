@@ -12,6 +12,7 @@ from app.core.config import (
 )
 from app.services import tenant
 from app.services import whatsapp_policy
+from app.services.lead_stage import change_lead_stage
 
 router = APIRouter()
 
@@ -103,18 +104,22 @@ def _process_analytics_and_extraction_bg(
     # 3. Status Updates (Independent Try/Except)
     try:
         if score in req_won_stages:
-            store.update_lead_status(
-                sender_phone,
-                "Qualified",
+            change_lead_stage(
                 client_id=current_client_id,
+                phone=sender_phone,
+                new_stage="Qualified",
+                source="whatsapp:background_scoring",
+                actor="system:whatsapp-background",
             )
         elif score == "Cold":
             if whatsapp_policy.is_opt_out_text(user_text):
                 lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                store.update_lead_status(
-                    sender_phone,
-                    lost_stage,
+                change_lead_stage(
                     client_id=current_client_id,
+                    phone=sender_phone,
+                    new_stage=lost_stage,
+                    source="whatsapp:background_opt_out",
+                    actor="system:whatsapp-background",
                 )
                 logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
     except Exception as e:

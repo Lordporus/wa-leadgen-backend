@@ -5,7 +5,7 @@ from app.api.routers import leads
 
 def test_dashboard_stats_uses_store_backed_leads_and_tenant_won_lost(monkeypatch):
     """
-    Test 1, 2, 3, 4, 7: Ensure get_dashboard_stats reads from store.get_all_leads
+    Test 1, 2, 3, 4, 7: Ensure get_dashboard_stats reads from the Postgres store.get_all_leads
     and uses tenant won/lost stage definitions.
     """
     mock_store_leads = [

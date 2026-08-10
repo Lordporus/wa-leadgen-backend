@@ -142,7 +142,7 @@ class FakePostgresStore:
 
 
 @pytest.mark.parametrize("mode", ["airtable", "dual"])
-def test_airtable_backed_modes_list_detail_stage_use_same_id(monkeypatch, mode):
+def test_airtable_backed_modes_reject_stage_mutation_by_airtable_id(monkeypatch, mode):
     fake_store = FakeDualStore()
     active_store = (
         fake_store
@@ -167,15 +167,16 @@ def test_airtable_backed_modes_list_detail_stage_use_same_id(monkeypatch, mode):
     )
     assert detail["id"] == returned_id
 
-    updated = _route(leads.update_lead_stage)(
-        _request(f"/api/leads/{returned_id}/stage"),
-        Response(),
-        returned_id,
-        leads.StageUpdateBody(stage="Contacted"),
-        client,
-    )
-    assert updated == {"success": True, "stage": "Contacted"}
-    assert fake_store.updated_ids == [returned_id]
+    with pytest.raises(HTTPException) as error:
+        _route(leads.update_lead_stage)(
+            _request(f"/api/leads/{returned_id}/stage"),
+            Response(),
+            returned_id,
+            leads.StageUpdateBody(stage="Contacted"),
+            client,
+        )
+    assert error.value.status_code == 404
+    assert fake_store.updated_ids == []
 
 
 def test_airtable_only_messages_takeover_and_release_use_list_id(monkeypatch):
@@ -421,6 +422,16 @@ def test_postgres_mode_all_related_routes_accept_list_id(monkeypatch):
     monkeypatch.setattr(leads, "store", fake_store)
     monkeypatch.setattr(leads, "_is_postgres_store", lambda: True)
     monkeypatch.setattr(leads, "SessionLocal", lambda: nullcontext(session))
+    monkeypatch.setattr(
+        leads,
+        "change_lead_stage",
+        lambda **kwargs: (
+            fake_store.update_lead_status_by_id(
+                kwargs["lead_id"], kwargs["new_stage"], kwargs["client_id"]
+            )
+            and SimpleNamespace(new_stage=kwargs["new_stage"])
+        ),
+    )
     monkeypatch.setattr(leads.whatsapp_inbox, "timeline", lambda **_: [{"role": "user"}])
     monkeypatch.setattr(leads.whatsapp_inbox, "transition_takeover", lambda **kw: SimpleNamespace(version=kw["expected_version"] + 1, owner="operator", reason=kw["reason"]))
     monkeypatch.setattr(leads.whatsapp_inbox, "create_manual_intent", lambda **_: (92, True))

@@ -6,15 +6,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_client_key, limiter, require_api_key
-from app.api.runtime import logger, store
+from app.api.runtime import logger
 from app.core.config import LEGACY_LEAD_ID_COMPAT_ENABLED
 from app.core.database import SessionLocal
 from app.core.models import Client, EmailSuppression, Lead
 from app.email.email_validation import validate_lead_email
 from app.services import tenant, whatsapp_inbox, whatsapp_outbox
+from app.services.lead_stage import (
+    InvalidLeadStage,
+    LeadNotFound,
+    StageStoreUnavailable,
+    change_lead_stage,
+)
 from app.store.db_client import DatabaseClient
 
 router = APIRouter()
+store = DatabaseClient()
 
 class StageUpdateBody(BaseModel):
     stage: str
@@ -418,36 +425,26 @@ def update_lead_stage(
     body: StageUpdateBody,
     client: Client = Depends(require_api_key),
 ):
-    """Update a lead stage using the active mode's stable public ID."""
-    valid_stages = {"New Lead", "Contacted", "Qualified", "Booked", "Lost"}
-    if body.stage not in valid_stages:
-        raise HTTPException(status_code=422, detail=f"Invalid stage. Must be one of: {valid_stages}")
+    """Update a Postgres lead through the canonical stage service."""
+    if not lead_id.isdigit():
+        raise HTTPException(status_code=404, detail="Lead not found")
+    _, actor = _operation_context(request, response, client.id)
     try:
-        record = _store_record_for_lead_id(lead_id, client.id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Lead not found or update failed")
-        record_id = str(record["id"])
-        if _is_postgres_store():
-            result = store.update_lead_status_by_id(
-                record_id,
-                body.stage,
-                client_id=client.id,
-            )
-        else:
-            result = store.update_lead_status_by_id(
-                record_id,
-                body.stage,
-                client_id=client.id,
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=503, detail="data source unavailable")
+        change = change_lead_stage(
+            client_id=client.id,
+            lead_id=int(lead_id),
+            new_stage=body.stage,
+            source="api:kanban",
+            actor=actor,
+        )
+    except InvalidLeadStage as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LeadNotFound as exc:
+        raise HTTPException(status_code=404, detail="Lead not found") from exc
+    except StageStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="data source unavailable") from exc
 
-    if not result:
-        raise HTTPException(status_code=404, detail="Lead not found or update failed")
-
-    return {"success": True, "stage": body.stage}
+    return {"success": True, "stage": change.new_stage}
 
 class TakeoverBody(BaseModel):
     expected_version: int = Field(ge=0)

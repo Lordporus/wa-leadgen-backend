@@ -37,6 +37,7 @@ from app.core.models import (
     PipelineStage,
 )
 from app.services.usage import check_limit, log_usage
+from app.services.lead_stage import mutate_lead_stage
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +837,14 @@ def _process_one(session, enr: EmailCampaignEnrollment, now: datetime) -> str:
     )
 
     if (lead.status or "") == "New Lead":
-        lead.status = "Contacted"
+        mutate_lead_stage(
+            session,
+            client_id=client.id,
+            lead_id=lead.id,
+            new_stage="Contacted",
+            source="email:campaign_send",
+            actor="system:email-campaign",
+        )
     if not lead.email_status:
         lead.email_status = "valid"
     lead.updated_at = now

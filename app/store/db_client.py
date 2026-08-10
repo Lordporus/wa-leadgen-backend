@@ -25,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import SessionLocal, is_configured
 from app.core.models import Lead, Message, Client
+from app.services.lead_stage import mutate_lead_stage
 
 logger = logging.getLogger(__name__)
 
@@ -312,45 +313,46 @@ class DatabaseClient:
         status: str,
         client_id: int,
     ) -> dict | None:
-        """Update lead status using its primary key, scoped to tenant."""
+        """Canonical tenant-scoped Postgres stage mutation by lead ID."""
         if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
-                row = s.execute(
-                    select(Lead).where(Lead.id == int(record_id), Lead.client_id == client_id)
-                ).scalar_one_or_none()
-                if not row:
-                    return None
-                row.status = status
-                row.updated_at = datetime.utcnow()
+                change = mutate_lead_stage(
+                    s,
+                    client_id=client_id,
+                    lead_id=int(record_id),
+                    new_stage=status,
+                    source="store:database_client",
+                    actor="system:store",
+                )
                 s.commit()
-                s.refresh(row)
-                logger.info(f"Postgres updated lead {record_id} to {status}")
-                return self._record(row)
-        except (SQLAlchemyError, ValueError) as e:
+                row = s.get(Lead, change.lead_id)
+                return self._record(row) if row else None
+        except (SQLAlchemyError, ValueError, LookupError) as e:
             logger.error(f"Postgres update_lead_status_by_id error: {e}")
             return None
 
-    def update_lead_status(self, phone: str, status: str, client_id: int) -> dict | None:
-        """Find lead by phone within tenant and update its Status field."""
+    def update_lead_status(
+        self, phone: str, status: str, client_id: int
+    ) -> dict | None:
+        """Canonical tenant-scoped Postgres stage mutation by phone."""
         if not self.ok or client_id is None:
             return None
         try:
             with self._session() as s:
-                row = s.execute(
-                    select(Lead).where(Lead.phone == phone, Lead.client_id == client_id)
-                ).scalar_one_or_none()
-                if not row:
-                    logger.warning(f"Lead not found for status update: {phone}")
-                    return None
-                row.status = status
-                row.updated_at = datetime.utcnow()
+                change = mutate_lead_stage(
+                    s,
+                    client_id=client_id,
+                    phone=phone,
+                    new_stage=status,
+                    source="store:database_client",
+                    actor="system:store",
+                )
                 s.commit()
-                s.refresh(row)
-                logger.info(f"Status updated → {status}: {phone}")
-                return self._record(row)
-        except (SQLAlchemyError, ValueError) as e:
+                row = s.get(Lead, change.lead_id)
+                return self._record(row) if row else None
+        except (SQLAlchemyError, ValueError, LookupError) as e:
             logger.error(f"Postgres update_lead_status error: {e}")
             return None
 
