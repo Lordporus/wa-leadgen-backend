@@ -12,7 +12,7 @@ from app.services import dashboard_events
 
 
 def test_dashboard_event_publishes_only_after_commit(monkeypatch):
-    published = []
+    published: list[dashboard_events.DashboardLeadEvent] = []
     monkeypatch.setattr(dashboard_events, "_publish_committed_event", published.append)
     session = Session()
 
@@ -26,7 +26,7 @@ def test_dashboard_event_publishes_only_after_commit(monkeypatch):
 
 
 def test_dashboard_event_is_discarded_after_rollback(monkeypatch):
-    published = []
+    published: list[dashboard_events.DashboardLeadEvent] = []
     monkeypatch.setattr(dashboard_events, "_publish_committed_event", published.append)
     session = Session()
     session.begin()
@@ -40,7 +40,7 @@ def test_dashboard_event_is_discarded_after_rollback(monkeypatch):
 
 
 def test_direct_lead_create_and_update_are_captured_after_commit(monkeypatch):
-    published = []
+    published: list[dashboard_events.DashboardLeadEvent] = []
     monkeypatch.setattr(dashboard_events, "_publish_committed_event", published.append)
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[Client.__table__, Lead.__table__])

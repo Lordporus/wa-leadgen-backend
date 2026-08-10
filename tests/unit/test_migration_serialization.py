@@ -11,7 +11,7 @@ def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
     def execute(statement, params=None):
         events.append((str(statement), params))
         result = MagicMock()
-        result.scalar_one_or_none.return_value = "0022" if upgrade.called else "0021"
+        result.scalar_one_or_none.return_value = "0023" if upgrade.called else "0022"
         return result
 
     connection.execute.side_effect = execute
@@ -32,8 +32,8 @@ def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
 
     run_migrations.run_migrations(
         "postgresql://offline/never-connected",
-        expected_current_revision="0021",
-        expected_target_revision="0022",
+        expected_current_revision="0022",
+        expected_target_revision="0023",
         backup_verified=True,
         approval_id="OFFLINE-TEST",
     )
@@ -41,7 +41,7 @@ def test_migrations_run_while_postgres_advisory_lock_is_held(monkeypatch):
     assert "pg_advisory_xact_lock" in events[0][0]
     assert events[-2][0] == "alembic"
     assert events[-2][1] is connection
-    assert events[-2][2] == "0022"
+    assert events[-2][2] == "0023"
     assert "SELECT version_num FROM alembic_version" in events[-1][0]
     engine.dispose.assert_called_once_with()
 
@@ -52,7 +52,7 @@ def test_migration_failure_exits_transaction_and_disposes_engine(monkeypatch):
     def execute(statement, params=None):
         events.append(str(statement))
         result = MagicMock()
-        result.scalar_one_or_none.return_value = "0021"
+        result.scalar_one_or_none.return_value = "0022"
         return result
 
     connection.execute.side_effect = execute
@@ -69,8 +69,8 @@ def test_migration_failure_exits_transaction_and_disposes_engine(monkeypatch):
     try:
         run_migrations.run_migrations(
             "postgresql://offline/never-connected",
-            expected_current_revision="0021",
-            expected_target_revision="0022",
+            expected_current_revision="0022",
+            expected_target_revision="0023",
             backup_verified=True,
             approval_id="OFFLINE-TEST",
         )
