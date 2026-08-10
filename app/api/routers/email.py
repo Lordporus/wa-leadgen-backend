@@ -24,6 +24,7 @@ from app.email.email_webhooks import (
     verify_resend_signature,
 )
 from app.services.usage import check_limit, log_usage
+from app.services.lead_stage import mutate_lead_stage
 
 router = APIRouter()
 
@@ -309,8 +310,14 @@ def send_email_to_lead(
 
         # First-touch stage bump (mirrors WhatsApp inbound / outreach pattern).
         if (lead.status or "") == "New Lead":
-            lead.status = "Contacted"
-            lead.updated_at = datetime.utcnow()
+            mutate_lead_stage(
+                s,
+                client_id=client.id,
+                lead_id=lead.id,
+                new_stage="Contacted",
+                source="email:manual_send",
+                actor=f"tenant:{client.id}:authenticated-session",
+            )
 
         if not lead.email_status:
             lead.email_status = "valid"

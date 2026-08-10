@@ -23,6 +23,7 @@ from app.services import whatsapp_outbox
 from app.services import whatsapp_policy
 from app.services import ai_decision
 from app.services import whatsapp_inbox
+from app.services.lead_stage import change_lead_stage, mutate_lead_stage
 from app.services.guardrails import minimize_sensitive_text, scan_input
 
 logger = logging.getLogger(__name__)
@@ -143,10 +144,12 @@ def process_webhook_message(
         inbound_event_id=inbound_event_id,
     ):
         lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-        store.update_lead_status(
-            sender_phone,
-            lost_stage,
+        change_lead_stage(
             client_id=current_client_id,
+            phone=sender_phone,
+            new_stage=lost_stage,
+            source="whatsapp:opt_out",
+            actor="system:whatsapp-worker",
         )
         logger.info("Durable WhatsApp opt-out recorded; automated reply suppressed")
         return
@@ -197,7 +200,13 @@ def process_webhook_message(
 
     current_status = lead.get("fields", {}).get("Status", "New Lead")
     if current_status == "New Lead":
-        store.update_lead_status(sender_phone, "Contacted", client_id=current_client_id)
+        change_lead_stage(
+            client_id=current_client_id,
+            phone=sender_phone,
+            new_stage="Contacted",
+            source="whatsapp:first_inbound",
+            actor="system:whatsapp-worker",
+        )
 
     # ── 4b. Human takeover gate ──────────────────────────────────────────
     if lead.get("fields", {}).get("is_human_takeover"):
@@ -446,7 +455,14 @@ def _run_analytics(
                 if string_score == "Cold":
                     if whatsapp_policy.is_opt_out_text(user_text):
                         lost_stage = req_lost_stages[0] if req_lost_stages else "Lost"
-                        lead.status = lost_stage
+                        mutate_lead_stage(
+                            session,
+                            client_id=current_client_id,
+                            lead_id=lead.id,
+                            new_stage=lost_stage,
+                            source="whatsapp:analytics_opt_out",
+                            actor="system:whatsapp-worker",
+                        )
                         session.commit()
                         logger.info(f"Lead {sender_phone} marked as {lost_stage} due to explicit decline.")
 

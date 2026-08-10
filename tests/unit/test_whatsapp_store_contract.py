@@ -433,6 +433,7 @@ def test_dual_takeover_state_is_visible_to_worker_read_primary(monkeypatch):
         lost_stages=["Lost"],
     )
     monkeypatch.setattr(jobs, "get_store", lambda: store)
+    monkeypatch.setattr(jobs, "change_lead_stage", lambda **_kwargs: None)
     monkeypatch.setattr(
         jobs.tenant,
         "resolve_context_by_phone_id",
@@ -497,6 +498,10 @@ def test_clear_decline_is_persisted_before_ai_generation(monkeypatch):
         return True
 
     monkeypatch.setattr(jobs, "get_store", lambda: store)
+    stage_changes: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jobs, "change_lead_stage", lambda **kwargs: stage_changes.append(kwargs)
+    )
     monkeypatch.setattr(
         jobs.tenant, "resolve_context_by_phone_id", lambda _phone_id: context
     )
@@ -523,10 +528,16 @@ def test_clear_decline_is_persisted_before_ai_generation(monkeypatch):
 
     assert order == ["opt_out"]
     context.gemini.generate_response_with_history.assert_not_called()
-    primary.update_lead_status.assert_called_once_with(
-        "919999999999", "Lost", client_id=7
-    )
-
+    assert stage_changes == [
+        {
+            "client_id": 7,
+            "phone": "919999999999",
+            "new_stage": "Lost",
+            "source": "whatsapp:opt_out",
+            "actor": "system:whatsapp-worker",
+        }
+    ]
+    primary.update_lead_status.assert_not_called()
 
 def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
     store, primary, secondary = _dual_store()
@@ -537,6 +548,10 @@ def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
         lost_stages=["Lost"],
     )
     monkeypatch.setattr(jobs, "get_store", lambda: store)
+    stage_changes: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jobs, "change_lead_stage", lambda **kwargs: stage_changes.append(kwargs)
+    )
     monkeypatch.setattr(
         jobs.tenant,
         "resolve_context_by_phone_id",
@@ -575,12 +590,16 @@ def test_webhook_worker_uses_tenant_scoped_dual_store_signatures(monkeypatch):
         client_id=7,
     )
     secondary.append_message.assert_not_called()
-    primary.update_lead_status.assert_called_once_with(
-        "919999999999",
-        "Contacted",
-        client_id=7,
-    )
-
+    assert stage_changes == [
+        {
+            "client_id": 7,
+            "phone": "919999999999",
+            "new_stage": "Contacted",
+            "source": "whatsapp:first_inbound",
+            "actor": "system:whatsapp-worker",
+        }
+    ]
+    primary.update_lead_status.assert_not_called()
 
 def test_status_worker_resolves_and_forwards_tenant_context(monkeypatch):
     store, _, secondary = _dual_store()

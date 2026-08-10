@@ -22,6 +22,7 @@ from app.api.routers import (
     email,
     health,
     leads,
+    realtime,
     settings,
     whatsapp as whatsapp_routes,
     whatsapp_dead_letters as whatsapp_dead_letter_routes,
@@ -234,6 +235,7 @@ app.include_router(campaigns.router)
 app.include_router(settings.account_router)
 app.include_router(admin.router)
 app.include_router(leads.router)
+app.include_router(realtime.router)
 app.include_router(agency.router)
 app.include_router(documents.router)
 app.include_router(billing.router)

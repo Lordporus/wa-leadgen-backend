@@ -233,6 +233,11 @@ def test_crash_recovery_send_reuses_persisted_attempt_key(monkeypatch):
         lambda **kwargs: ("Body", "<p>Body</p>"),
     )
     monkeypatch.setattr(email_campaigns, "log_usage", lambda *a, **k: None)
+    monkeypatch.setattr(
+        email_campaigns,
+        "mutate_lead_stage",
+        lambda _session, **kwargs: setattr(lead, "status", kwargs["new_stage"]),
+    )
 
     outcome = email_campaigns._process_one(session, enrollment, now)
 
