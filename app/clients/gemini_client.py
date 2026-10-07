@@ -1,4 +1,4 @@
-import google.generativeai as genai
+from google import genai
 from openai import OpenAI
 import logging
 import json
@@ -12,9 +12,14 @@ from app.core.config import (
 
 logger = logging.getLogger(__name__)
 
-# Configure Gemini (fallback)
+# Configure Gemini (fallback or direct)
+_genai_client: genai.Client | None = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+        logger.info("Direct Google GenAI client configured")
+    except Exception as e:
+        logger.error(f"Failed to initialize Google GenAI client: {e}")
 else:
     logger.warning("GEMINI_API_KEY not found. Direct-Gemini fallback won't work.")
 
@@ -74,7 +79,7 @@ class GeminiClient:
                        Falls back to DEFAULT_SYSTEM_PROMPT when None/empty.
         calendly_link: per-client booking URL. Replaces {calendly_link} placeholder.
         """
-        self._fallback_model = genai.GenerativeModel('gemini-2.5-flash')
+        self._model_name = 'gemini-2.5-flash'
         self._system_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
         self._calendly_link = (calendly_link or "").strip()
         
@@ -137,19 +142,41 @@ class GeminiClient:
                 logger.warning(f"9Router failed ({e}), falling back to direct Gemini")
 
         # ── Fallback: direct Gemini SDK ──
-        try:
-            gemini_history = [
-                {"role": "user", "parts": [active_prompt]},
-                {"role": "model", "parts": ["Understood. I will act as the sales assistant in Hinglish."]}
-            ]
-            gemini_history.extend(parsed_history)
+        if _genai_client:
+            try:
+                contents = []
+                for turn in parsed_history:
+                    role = "model" if turn.get("role") == "model" else "user"
+                    parts = turn.get("parts", [])
+                    turn_text = parts[0] if parts else ""
+                    if turn_text:
+                        contents.append(
+                            genai.types.Content(
+                                role=role,
+                                parts=[genai.types.Part.from_text(text=turn_text)],
+                            )
+                        )
+                contents.append(
+                    genai.types.Content(
+                        role="user",
+                        parts=[genai.types.Part.from_text(text=user_message)],
+                    )
+                )
 
-            chat = self._fallback_model.start_chat(history=gemini_history)
-            response = chat.send_message(user_message)
-            logger.info("Direct Gemini fallback OK")
-            return response.text
-        except Exception as e:
-            logger.error(f"Both 9Router and direct Gemini failed: {e}")
+                response = _genai_client.models.generate_content(
+                    model=self._model_name,
+                    contents=contents,
+                    config=genai.types.GenerateContentConfig(
+                        system_instruction=active_prompt,
+                    ),
+                )
+                logger.info("Direct Gemini fallback OK")
+                return response.text or ""
+            except Exception as e:
+                logger.error(f"Both 9Router and direct Gemini failed: {e}")
+                return "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
+        else:
+            logger.error("Direct Gemini client is not configured")
             return "Sorry, abhi network issue hai. Main thodi der mein aapse connect karta hu."
 
     def generate_structured_decision(
@@ -192,11 +219,14 @@ class GeminiClient:
                 raise ValueError("empty_structured_response")
             return json.loads(content)
         if provider_route == "gemini":
-            if model_name != "gemini-2.5-flash" or not GEMINI_API_KEY:
+            if model_name != "gemini-2.5-flash" or not _genai_client:
                 raise ValueError("unsupported_or_unconfigured_gemini_model")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(instruction)
-            return json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+            response = _genai_client.models.generate_content(
+                model=model_name,
+                contents=instruction,
+            )
+            raw_text = (response.text or "").strip().removeprefix("```json").removesuffix("```").strip()
+            return json.loads(raw_text)
         raise ValueError("unsupported_provider_route")
 
     def extract_lead_info(self, text: str):
@@ -223,13 +253,18 @@ class GeminiClient:
                 logger.warning(f"9Router extract failed ({e}), falling back to direct Gemini")
 
         # ── Fallback: direct Gemini SDK ──
-        try:
-            response = self._fallback_model.generate_content(prompt)
-            content = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(content)
-        except Exception as e:
-            logger.error(f"Extraction error: {e}")
-            return {}
+        if _genai_client:
+            try:
+                response = _genai_client.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                )
+                content = (response.text or "").replace("```json", "").replace("```", "").strip()
+                return json.loads(content)
+            except Exception as e:
+                logger.error(f"Extraction error via direct Gemini: {e}")
+                return {}
+        return {}
 
     def score_lead(self, conversation_text: str) -> dict:
         prompt = f"""
@@ -279,9 +314,14 @@ class GeminiClient:
                 logger.warning(f"9Router score failed ({e}), falling back to direct Gemini")
 
         # ── Fallback: direct Gemini SDK ──
-        try:
-            response = self._fallback_model.generate_content(prompt)
-            return _calculate_score(response.text)
-        except Exception as e:
-            logger.error(f"Scoring error: {e}")
-            return {"score": 0, "summary": "Error"}
+        if _genai_client:
+            try:
+                response = _genai_client.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                )
+                return _calculate_score(response.text or "")
+            except Exception as e:
+                logger.error(f"Scoring error via direct Gemini: {e}")
+                return {"score": 0, "summary": "Error"}
+        return {"score": 0, "summary": "Error"}
